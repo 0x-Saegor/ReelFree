@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { decide } = require('../../web/instagram.js');
+const { decideYT } = require('../../web/youtube.js');
 
 const FILE = path.join(__dirname, '../vectors/policy.json');
 const NOW = 1_800_000_000_000;
@@ -37,7 +38,7 @@ test('policy.json has at least 40 well-formed vectors with unique names', () => 
   }
 });
 
-test('policy.json is in sync with tests/vectors/generate.cjs', () => {
+test('policy.json and youtube.json are in sync with tests/vectors/generate.cjs', () => {
   execFileSync(process.execPath, [path.join(__dirname, '../vectors/generate.cjs'), '--check'], { stdio: 'pipe' });
 });
 
@@ -47,5 +48,21 @@ for (const v of vectors) {
     for (const [k, want] of Object.entries(v.expect)) {
       assert.deepEqual(r[k], want, `${v.name} (${v.path}): ${k}`);
     }
+  });
+}
+
+// YouTube (Avenant 3): ctx = {config: {hideHomeFeed}}; path may carry ?query.
+const ytVectors = JSON.parse(fs.readFileSync(path.join(__dirname, '../vectors/youtube.json'), 'utf8'));
+
+test('youtube.json has at least 30 well-formed vectors with unique names', () => {
+  assert.ok(ytVectors.length >= 30, `only ${ytVectors.length} vectors`);
+  assert.equal(new Set(ytVectors.map((v) => v.name)).size, ytVectors.length);
+  for (const v of ytVectors) assert.ok(['allow', 'redirect', 'hide'].includes(v.expect.action), v.name);
+});
+
+for (const v of ytVectors) {
+  test(`youtube vector — ${v.name}`, () => {
+    const r = decideYT(v.path, '', v.ctx);
+    for (const [k, want] of Object.entries(v.expect)) assert.deepEqual(r[k], want, `${v.name} (${v.path}): ${k}`);
   });
 }

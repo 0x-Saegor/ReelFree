@@ -1,3 +1,9 @@
 node_modules/
 test-results/
 playwright-report/
+
+# internal / personal (public repo)
+board/archive/
+archive/
+.impeccable/
+bin/launch

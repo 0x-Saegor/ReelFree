@@ -28,8 +28,9 @@ SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 fail() { printf 'FAIL %s\n' "$1"; exit "${2:-1}"; }
 
-# Domains allowed in WKAppBoundDomains (docs/SPEC-iOS.md, at most 10 entries).
-APP_BOUND='instagram.com www.instagram.com cdninstagram.com fbcdn.net youtube.com m.youtube.com www.youtube.com ytimg.com googlevideo.com'
+# Domains allowed in WKAppBoundDomains (at most 10 entries).
+# docs/SPEC-iOS.md, avenant 1: registrable domains (eTLD+1), each covers its subdomains.
+APP_BOUND='instagram.com cdninstagram.com fbcdn.net youtube.com ytimg.com googlevideo.com google.com gstatic.com'
 # Modules the app may import. Anything else is a third-party dependency.
 SWIFT_IMPORTS='SwiftUI UIKit WebKit Foundation Combine os OSLog XCTest Observation'
 
@@ -419,13 +420,13 @@ targets:
       properties:
         WKAppBoundDomains:
           - instagram.com
-          - www.instagram.com
+          - youtube.com
 YML
     cat > "$T/ios/ReelFree/Info.plist" <<'PL'
 <?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
   <key>WKAppBoundDomains</key>
-  <array><string>instagram.com</string><string>www.instagram.com</string></array>
+  <array><string>instagram.com</string><string>youtube.com</string></array>
 </dict></plist>
 PL
     cat > "$T/ios/ReelFree/PrivacyInfo.xcprivacy" <<'PL'
@@ -499,7 +500,7 @@ SW
   scheck bound-foreign-yml  "sed -i 's/- instagram.com/- evil.example/' ios/project.yml"
   scheck bound-wildcard     "sed -i 's/- instagram.com/- \"*.instagram.com\"/' ios/project.yml"
   scheck bound-too-many     "sed -i 's|<string>instagram.com</string>|$(printf '<string>instagram.com</string>%.0s' $(seq 1 11))|' ios/ReelFree/Info.plist"
-  scheck bound-empty        "sed -i 's|<array><string>instagram.com</string><string>www.instagram.com</string></array>|<array></array>|' ios/ReelFree/Info.plist"
+  scheck bound-empty        "sed -i 's|<array><string>instagram.com</string><string>youtube.com</string></array>|<array></array>|' ios/ReelFree/Info.plist"
   scheck yml-packages       "printf 'packages:\n  Foo:\n    url: x\n' >> ios/project.yml"
   scheck yml-dep-package    "sed -i 's/- sdk: WebKit.framework/- package: Foo/' ios/project.yml"
   scheck yml-dep-framework  "sed -i 's/- sdk: WebKit.framework/- framework: Foo.xcframework/' ios/project.yml"

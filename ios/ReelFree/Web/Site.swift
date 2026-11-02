@@ -22,7 +22,7 @@ enum Site: String {
     /// Bundle resource name of the injected script (web/<name>.js).
     var scriptResource: String { rawValue }
 
-    /// Registrable domains a top-level document of this tab may live on.
+    /// Registrable domains whose documents are guarded by the route policy (SPEC-iOS, amendment 1).
     var documentDomains: [String] {
         switch self {
         case .instagram: return ["instagram.com"]
@@ -34,7 +34,24 @@ enum Site: String {
     var frameDomains: [String] {
         switch self {
         case .instagram: return ["instagram.com", "cdninstagram.com", "fbcdn.net"]
-        case .youtube: return ["youtube.com", "ytimg.com", "googlevideo.com"]
+        case .youtube: return ["youtube.com", "ytimg.com", "googlevideo.com", "gstatic.com"]
+        }
+    }
+
+    /// Exact Google hosts a YouTube sub-frame may load (F4); www.google.com only under /recaptcha/.
+    private var frameGoogleHosts: [String] {
+        switch self {
+        case .instagram: return []
+        case .youtube: return ["accounts.google.com", "consent.google.com"]
+        }
+    }
+
+    /// Exact hosts (not domains) a top-level document may also live on, outside the route policy:
+    /// the Google sign-in / consent flow of YouTube. Any other google.com page opens in Safari.
+    var auxiliaryHosts: [String] {
+        switch self {
+        case .instagram: return []
+        case .youtube: return ["accounts.google.com", "consent.google.com"]
         }
     }
 
@@ -50,7 +67,19 @@ enum Site: String {
         url.scheme?.lowercased() == "https" && Site.host(url.host, isIn: documentDomains)
     }
 
+    func isAuxiliaryURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https", let h = url.host?.lowercased() else { return false }
+        return auxiliaryHosts.contains(h)
+    }
+
     func isFrameURL(_ url: URL) -> Bool {
-        url.scheme?.lowercased() == "https" && Site.host(url.host, isIn: frameDomains)
+        guard url.scheme?.lowercased() == "https", let h = url.host?.lowercased() else { return false }
+        if Site.host(h, isIn: frameDomains) { return true }
+        if frameGoogleHosts.contains(h) { return true }
+        if self == .youtube && h == "www.google.com" {
+            let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath ?? ""
+            return path.hasPrefix("/recaptcha/")
+        }
+        return false
     }
 }

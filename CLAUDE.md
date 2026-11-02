@@ -1,7 +1,7 @@
 # ReelFree — app iOS : Instagram (et YouTube) sans Reels, sans scroll infini
 
 ## Mission
-Le livrable est une **app iOS native** (SwiftUI + WKWebView), distribuée par **TestFlight** sur le compte Apple Developer d'un ami d'Arthur. Arthur l'installe sur son **iPhone 11**. Chaque build TestFlight expire au bout de 90 jours : la CI en refait un régulièrement.
+Le livrable est une **app iOS native** (SwiftUI + WKWebView), distribuée par **TestFlight** sur le compte Apple Developer d'un ami. Le propriétaire l'installe sur son **iPhone 11**. Chaque build TestFlight expire au bout de 90 jours : la CI en refait un régulièrement.
 - Pas de Mac. **Tout ce qui est Swift est compilé et testé sur GitHub Actions (runner macOS).** En local (Linux), on ne peut tester que le JavaScript (Node + Playwright WebKit).
 - L'app charge instagram.com (et youtube.com) dans une WKWebView, avec une **garde de navigation native** et un **script injecté** qui masque Reels, Explore et le scroll infini. Les reels reçus en DM restent visibles (docs/SPEC.md, docs/SPEC-iOS.md).
 - Référence produit : Relockin et SocialLite, des navigateurs « focus » qui masquent Reels et Shorts.
@@ -39,5 +39,8 @@ Protocole :
 1. **Tâches** : dans `board/TASKS.md`, passe tes lignes à `[~]` (en cours), `[x]` (fait) ou `[!]` (bloqué, avec la raison). Ne touche pas aux lignes des autres agents.
 2. **Statut** : `board/status/<nom>.md`. La 1re ligne est ton statut en une phrase. Mets les demandes aux autres agents sous `## Demandes` (`@rf-xxx — ...`).
 3. Écris uniquement dans ton périmètre.
-4. Git : pas de commit, pas de push. Arthur ou l'orchestrateur s'en chargent.
+4. Git : pas de commit, pas de push, c'est l'orchestrateur qui pousse. Le repo est **public** : https://github.com/0x-Saegor/ReelFree (branche `main`).
+   - Ne mets **jamais** d'email, de nom réel, d'IP interne ni de données Instagram réelles dans les fichiers.
+   - Pour lire la CI sans `gh` (API publique) : `curl -s https://api.github.com/repos/0x-Saegor/ReelFree/actions/runs?per_page=5 | jq ...`, puis `.../actions/runs/<id>/jobs`.
+   - Les logs complets demandent une authentification : l'orchestrateur les récupère. Écris dans ton statut le job et l'étape en échec.
 5. Code et commentaires en anglais, docs en français.

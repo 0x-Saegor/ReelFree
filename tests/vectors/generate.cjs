@@ -1,19 +1,21 @@
 #!/usr/bin/env node
 'use strict';
-// Builds tests/vectors/policy.json, the shared route-policy vectors (docs/SPEC-iOS.md).
+// Builds the shared route-policy vectors (docs/SPEC-iOS.md):
+//   tests/vectors/policy.json   Instagram, web/instagram.js decide()
+//   tests/vectors/youtube.json  YouTube, web/youtube.js decideYT() (Avenant 3)
 // Each case states the expected action (and redirect target) by hand, from docs/SPEC.md; the
-// remaining keys (consumeToken, reason, mode, reelId) are taken from web/instagram.js decide()
-// and frozen into the JSON, so RoutePolicy.swift must reproduce them exactly.
-// The script refuses to write if decide() disagrees with a hand-written expectation.
+// remaining keys (consumeToken, reason, mode, reelId) are taken from the JS policy and frozen into
+// the JSON, so the Swift ports must reproduce them exactly.
+// The script refuses to write if the JS policy disagrees with a hand-written expectation.
 //
-//   node tests/vectors/generate.cjs          # rewrite policy.json
-//   node tests/vectors/generate.cjs --check  # exit 1 if policy.json is stale
+//   node tests/vectors/generate.cjs          # rewrite both files
+//   node tests/vectors/generate.cjs --check  # exit 1 if a file is stale
 
 const fs = require('node:fs');
 const path = require('node:path');
 const { decide } = require('../../web/instagram.js');
+const { decideYT } = require('../../web/youtube.js');
 
-const OUT = path.join(__dirname, 'policy.json');
 const NOW = 1_800_000_000_000;
 const T = '/direct/t/123/';
 const ID = 'AbCdE12345';
@@ -125,32 +127,94 @@ function toDecideCtx(c) {
   return out;
 }
 
-const vectors = [];
-const errors = [];
-const names = new Set();
-for (const [name, p, ctx, want] of CASES) {
-  if (names.has(name)) errors.push(`duplicate name: ${name}`);
-  names.add(name);
-  const r = decide(p, toDecideCtx(ctx));
-  if (r.action !== want.action || ('to' in want && r.to !== want.to)) {
-    errors.push(`${name}: want ${JSON.stringify(want)}, decide() gave ${JSON.stringify(r)}`);
+// YouTube. ctx: {config: {hideHomeFeed}} (native setting ytHideHomeFeed; default false).
+// path may carry ?query (ignored by the policy, never copied into 'to').
+const VID = 'dQw4w9WgXcQ';
+const CH = 'UC' + 'a'.repeat(22);
+const YT_CASES = [
+  ['Y home', '/', {}, { action: 'allow' }],
+  ['Y home with query', '/?app=m', {}, { action: 'allow' }],
+  ['Y home hidden (ytHideHomeFeed)', '/', { config: { hideHomeFeed: true } }, { action: 'allow' }],
+  ['Y watch', `/watch?v=${VID}`, {}, { action: 'allow' }],
+  ['Y watch with timestamp', `/watch?v=${VID}&t=42`, {}, { action: 'allow' }],
+  ['Y search results', '/results?search_query=x', {}, { action: 'allow' }],
+  ['Y subscriptions feed', '/feed/subscriptions', {}, { action: 'allow' }],
+  ['Y library', '/feed/library', {}, { action: 'allow' }],
+  ['Y channel by handle', '/@someone', {}, { action: 'allow' }],
+  ['Y channel videos tab', '/@someone/videos', {}, { action: 'allow' }],
+  ['Y channel by id', `/channel/${CH}`, {}, { action: 'allow' }],
+  ['Y playlist', '/playlist?list=PL123', {}, { action: 'allow' }],
+  ['Y path containing shorts as a word', '/@shortsfan', {}, { action: 'allow' }],
+  ['Y short to watch', `/shorts/${VID}`, {}, { action: 'redirect', to: `/watch?v=${VID}` }],
+  ['Y short trailing slash', `/shorts/${VID}/`, {}, { action: 'redirect', to: `/watch?v=${VID}` }],
+  ['Y short uppercase prefix', `/SHORTS/${VID}`, {}, { action: 'redirect', to: `/watch?v=${VID}` }],
+  ['Y short with share query (dropped)', `/shorts/${VID}?feature=share&si=x`, {}, { action: 'redirect', to: `/watch?v=${VID}` }],
+  ['Y short with fragment', `/shorts/${VID}#x`, {}, { action: 'redirect', to: `/watch?v=${VID}` }],
+  ['Y short matrix param', `/shorts;x/${VID}`, {}, { action: 'redirect', to: `/watch?v=${VID}` }],
+  ['Y short id case preserved', '/shorts/AbCdEfGhIjK', {}, { action: 'redirect', to: '/watch?v=AbCdEfGhIjK' }],
+  ['Y shorts root', '/shorts/', {}, { action: 'redirect', to: '/' }],
+  ['Y shorts no slash', '/shorts', {}, { action: 'redirect', to: '/' }],
+  ['Y short id too short', '/shorts/tooShort', {}, { action: 'redirect', to: '/' }],
+  ['Y short id too long', `/shorts/${VID}X`, {}, { action: 'redirect', to: '/' }],
+  ['Y short id with injected query', '/shorts/abc%26v%3Dx12', {}, { action: 'redirect', to: '/' }],
+  ['Y shorts feed', '/feed/shorts', {}, { action: 'redirect', to: '/' }],
+  ['Y channel shorts tab (handle)', '/@someone/shorts', {}, { action: 'redirect', to: '/@someone' }],
+  ['Y channel shorts tab (id)', `/channel/${CH}/shorts`, {}, { action: 'redirect', to: `/channel/${CH}` }],
+  ['Y channel shorts tab (c)', '/c/Name_1/shorts', {}, { action: 'redirect', to: '/c/Name_1' }],
+  ['Y channel shorts tab (user)', '/user/Name.1/shorts', {}, { action: 'redirect', to: '/user/Name.1' }],
+  ['Y channel shorts tab, invalid handle', '/@a%20b/shorts', {}, { action: 'redirect', to: '/' }],
+  ['Y channel shorts tab, invalid channel id', '/channel/UCshort/shorts', {}, { action: 'redirect', to: '/' }],
+  ['Y channel shorts tab, dots-only name', '/user/../shorts', {}, { action: 'hide' }],
+  ['Y encoded slash', `/shorts%2F${VID}`, {}, { action: 'hide' }],
+  ['Y encoded traversal', '/user/..%2F..%2Fx/shorts', {}, { action: 'hide' }],
+  ['Y encoded protocol-relative', '/%2F%2Fevil.example/shorts', {}, { action: 'hide' }],
+  ['Y encoded backslash', '/%5Cshorts', {}, { action: 'hide' }],
+  ['Y dot-dot segment', `/x/../shorts/${VID}`, {}, { action: 'hide' }],
+  ['Y invalid percent-encoding', '/%E0%A4%A', {}, { action: 'hide' }],
+  ['Y lowercase encoded slash', `/shorts%2f${VID}`, {}, { action: 'hide' }],
+];
+
+function build(cases, run, keys, wantKeys) {
+  const vectors = [];
+  const errors = [];
+  const names = new Set();
+  for (const [name, p, ctx, want] of cases) {
+    if (names.has(name)) errors.push(`duplicate name: ${name}`);
+    names.add(name);
+    const r = run(p, ctx);
+    if (r.action !== want.action || ('to' in want && r.to !== want.to)) {
+      errors.push(`${name}: want ${JSON.stringify(want)}, policy gave ${JSON.stringify(r)}`);
+    }
+    const expect = { action: r.action };
+    if (r.action === 'redirect') expect.to = r.to;
+    for (const k of keys) expect[k] = r[k];
+    vectors.push({ name, path: p, ctx, expect });
   }
-  const expect = { action: r.action };
-  if (r.action === 'redirect') expect.to = r.to;
-  Object.assign(expect, { consumeToken: r.consumeToken, reason: r.reason, mode: r.mode, reelId: r.reelId });
-  vectors.push({ name, path: p, ctx, expect });
+  return { vectors, errors };
 }
+
+const OUTPUTS = [
+  ['policy.json', build(CASES, (p, c) => decide(p, toDecideCtx(c)), ['consumeToken', 'reason', 'mode', 'reelId'])],
+  ['youtube.json', build(YT_CASES, (p, c) => decideYT(p, '', c), ['reason', 'mode'])],
+];
+
+const errors = OUTPUTS.flatMap(([, b]) => b.errors);
 if (errors.length) {
   console.error(errors.join('\n'));
   process.exit(1);
 }
 
-const text = '[\n' + vectors.map((v) => '  ' + JSON.stringify(v)).join(',\n') + '\n]\n';
-if (process.argv.includes('--check')) {
-  const cur = fs.existsSync(OUT) ? fs.readFileSync(OUT, 'utf8') : '';
-  if (cur !== text) { console.error('tests/vectors/policy.json is stale: run node tests/vectors/generate.cjs'); process.exit(1); }
-  console.log(`policy.json up to date (${vectors.length} vectors)`);
-} else {
-  fs.writeFileSync(OUT, text);
-  console.log(`wrote ${path.relative(process.cwd(), OUT)} (${vectors.length} vectors)`);
+let stale = false;
+for (const [file, { vectors }] of OUTPUTS) {
+  const out = path.join(__dirname, file);
+  const text = '[\n' + vectors.map((v) => '  ' + JSON.stringify(v)).join(',\n') + '\n]\n';
+  if (process.argv.includes('--check')) {
+    const cur = fs.existsSync(out) ? fs.readFileSync(out, 'utf8') : '';
+    if (cur !== text) { console.error(`tests/vectors/${file} is stale: run node tests/vectors/generate.cjs`); stale = true; }
+    else console.log(`${file} up to date (${vectors.length} vectors)`);
+  } else {
+    fs.writeFileSync(out, text);
+    console.log(`wrote tests/vectors/${file} (${vectors.length} vectors)`);
+  }
 }
+process.exit(stale ? 1 : 0);

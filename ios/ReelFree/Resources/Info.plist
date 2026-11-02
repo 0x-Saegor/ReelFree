@@ -42,14 +42,13 @@
 	<key>WKAppBoundDomains</key>
 	<array>
 		<string>instagram.com</string>
-		<string>www.instagram.com</string>
 		<string>cdninstagram.com</string>
 		<string>fbcdn.net</string>
 		<string>youtube.com</string>
-		<string>m.youtube.com</string>
-		<string>www.youtube.com</string>
 		<string>ytimg.com</string>
 		<string>googlevideo.com</string>
+		<string>google.com</string>
+		<string>gstatic.com</string>
 	</array>
 </dict>
 </plist>

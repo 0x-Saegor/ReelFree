@@ -90,6 +90,18 @@ enum RoutePolicy {
         String(String.UnicodeScalarView(s.unicodeScalars.dropFirst(n)))
     }
 
+    /// /%2f|%5c|%2e%2e/i — encoded separators or dot-segments.
+    static func hasEncodedSeparator(_ p: String) -> Bool {
+        let lower = p.lowercased()
+        return lower.contains("%2f") || lower.contains("%5c") || lower.contains("%2e%2e")
+    }
+
+    /// /\\/ or /(^|\/)\.\.?(\/|$)/ on the decoded path.
+    static func hasBackslashOrDotSegment(_ decoded: String) -> Bool {
+        if decoded.contains("\\") { return true }
+        return decoded.components(separatedBy: "/").contains { $0 == "." || $0 == ".." }
+    }
+
     /// path.split('?')[0].split('#')[0]
     static func stripQueryAndFragment(_ path: String) -> String {
         let noQuery = path.components(separatedBy: "?").first ?? ""
@@ -176,13 +188,9 @@ enum RoutePolicy {
         let feedMode = (cfg.feedMode == "off") ? "off" : "limited"
 
         let p = stripQueryAndFragment(path)
-        let lower = p.lowercased()
-        if lower.contains("%2f") || lower.contains("%5c") || lower.contains("%2e%2e") { return hide("X3-path") }
+        if hasEncodedSeparator(p) { return hide("X3-path") }
         guard let decoded = p.removingPercentEncoding else { return hide("X3-decode") }
-        if decoded.contains("\\") { return hide("X3-path") }
-        for part in decoded.components(separatedBy: "/") where part == "." || part == ".." {
-            return hide("X3-path")
-        }
+        if hasBackslashOrDotSegment(decoded) { return hide("X3-path") }
 
         let raw = rawSegments(decoded)
         let seg = raw.map { $0.lowercased() }
@@ -227,8 +235,7 @@ enum RoutePolicy {
 
     /// Media shortcode targeted by a path (/reel/<id>, /reels/<id>, /tv/<id>, /p/<id>, /<user>/{reel,p}/<id>), or nil.
     static func mediaId(fromPath path: String) -> String? {
-        let lower = path.lowercased()
-        if lower.contains("%2f") || lower.contains("%5c") || lower.contains("%2e%2e") { return nil }
+        if hasEncodedSeparator(path) { return nil }
         guard let decoded = stripQueryAndFragment(path).removingPercentEncoding else { return nil }
         let raw = rawSegments(decoded)
         let seg = raw.map { $0.lowercased() }
@@ -287,7 +294,9 @@ enum YouTubePolicy {
 
     static func decide(path: String, hideHomeFeed: Bool) -> YouTubeDecision {
         let p = RoutePolicy.stripQueryAndFragment(path)
+        if RoutePolicy.hasEncodedSeparator(p) { return result(.hide, nil, "Y-path", "blocked") }
         guard let decoded = p.removingPercentEncoding else { return result(.hide, nil, "Y-decode", "blocked") }
+        if RoutePolicy.hasBackslashOrDotSegment(decoded) { return result(.hide, nil, "Y-path", "blocked") }
         let raw = RoutePolicy.rawSegments(decoded)
         let seg = raw.map { $0.lowercased() }
 

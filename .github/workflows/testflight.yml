@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 60
     environment: testflight
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -99,7 +99,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           RF_BUNDLE_ID: ${{ secrets.RF_BUNDLE_ID }}
         run: |
-          set -o pipefail
+          rc=0
           xcodebuild archive \
             -project "$RF_PROJECT" -scheme "$RF_SCHEME" \
             -configuration Release \
@@ -115,8 +115,14 @@ jobs:
             CODE_SIGN_STYLE=Automatic \
             CURRENT_PROJECT_VERSION="$RF_BUILD" \
             $RF_MARKETING \
-            | tee "$RUNNER_TEMP/archive.log" | grep -E '^(error|\*\*)' || true
-          test "${PIPESTATUS[0]}" -eq 0
+            > "$RUNNER_TEMP/archive.log" 2>&1 || rc=$?
+          # Public repo: logs are world-readable. Print only error lines, never the full
+          # log (it names the signing identity, i.e. the account holder's real name).
+          # Allowlist: status lines and error lines only, with quoted strings and
+          # parentheses (identity, team, profile names) redacted.
+          grep -E '(^\*\* [A-Z ]+ \*\*$|error:)' "$RUNNER_TEMP/archive.log" \
+            | sed -E -e 's/(Apple (Distribution|Development)|iPhone (Distribution|Developer)|[Tt]eam)[^"]*/\1: <redacted>/g' -e 's/"[^"]*"/"<redacted>"/g' -e "s/'[^']*'/'<redacted>'/g" -e 's/\([^)]*\)/(<redacted>)/g' | head -50 || true
+          exit $rc
 
       - name: Export + upload to App Store Connect
         env:
@@ -133,6 +139,7 @@ jobs:
             -c "Add :manageAppVersionAndBuildNumber bool false" \
             -c "Add :testFlightInternalTestingOnly bool true" \
             "$plist"
+          rc=0
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/ReelFree.xcarchive" \
             -exportOptionsPlist "$plist" \
@@ -140,18 +147,15 @@ jobs:
             -allowProvisioningUpdates \
             -authenticationKeyPath "$ASC_KEY_PATH" \
             -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            > "$RUNNER_TEMP/export.log" 2>&1 || rc=$?
+          # Same allowlist + redaction as above (public logs).
+          grep -E '(^\*\* [A-Z ]+ \*\*$|error:|EXPORT SUCCEEDED|Upload succeeded|Uploaded )' "$RUNNER_TEMP/export.log" \
+            | sed -E -e 's/(Apple (Distribution|Development)|iPhone (Distribution|Developer)|[Tt]eam)[^"]*/\1: <redacted>/g' -e 's/"[^"]*"/"<redacted>"/g' -e "s/'[^']*'/'<redacted>'/g" -e 's/\([^)]*\)/(<redacted>)/g' | head -50 || true
+          [ $rc -eq 0 ] || exit $rc
           echo "Uploaded build $RF_BUILD. It appears in TestFlight after Apple processing (~10-30 min)." \
             >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: archive-logs
-          path: ${{ runner.temp }}/archive.log
-          retention-days: 7
-
-      - name: Remove API key
+      - name: Remove API key and logs
         if: always()
-        run: rm -rf "$RUNNER_TEMP/asc"
+        run: rm -rf "$RUNNER_TEMP/asc" "$RUNNER_TEMP"/*.log

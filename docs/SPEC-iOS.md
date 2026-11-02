@@ -65,3 +65,8 @@ Les exigences fonctionnelles (R1–R5, D1–D4, S1–S3, X1–X4) sont dans `doc
   - `-exportArchive` avec `destination: upload`, `method: app-store-connect` ;
   - `CURRENT_PROJECT_VERSION = ${{ github.run_number }}`.
 - Secrets : `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8_BASE64`, `APPLE_TEAM_ID`, `RF_BUNDLE_ID`.
+
+## Avenants au contrat (orchestrateur, 2026-11-02 14:35)
+1. **WKAppBoundDomains** : les entrées sont des domaines enregistrables (eTLD+1) et couvrent leurs sous-domaines. Liste retenue : `instagram.com`, `cdninstagram.com`, `fbcdn.net`, `youtube.com`, `ytimg.com`, `googlevideo.com`, `google.com`, `gstatic.com` (connexion YouTube). Les scripts injectés doivent être **no-op** hors de leur hôte : instagram.js seulement sur `*.instagram.com`, youtube.js seulement sur `*.youtube.com`. La garde native ne s'applique qu'à ces hôtes.
+2. **Traversée d'historique** : le message `route` porte `via: "popstate"` quand la navigation vient de l'historique. Le natif invalide alors tout jeton DM. Pour un chargement de document, le natif ignore le jeton si `navigationType == .backForward`.
+3. **Vecteurs YouTube** : `tests/vectors/youtube.json`, au même format que policy.json, produit par rf-web et consommé par l'XCTest de rf-ios.

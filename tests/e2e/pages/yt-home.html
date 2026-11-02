@@ -1,0 +1,22 @@
+<!doctype html>
+<!-- Synthetic m.youtube.com page (B03): element names from web/youtube.js selectors, no real content.
+     window.__spa.go(path) emulates YouTube's client-side navigation (pushState, body kept). -->
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>YouTube</title></head>
+<body>
+  <ytm-browse>
+    <ytm-feed-filter-chip-bar-renderer><ytm-chip-cloud-chip-renderer id="chip-all">Tout</ytm-chip-cloud-chip-renderer><ytm-chip-cloud-chip-renderer id="chip-shorts">Shorts</ytm-chip-cloud-chip-renderer></ytm-feed-filter-chip-bar-renderer>
+    <ytm-rich-grid-renderer id="home-grid">
+      <ytm-rich-item-renderer id="video-1"><a href="/watch?v=AAAAAAAAAAA">Video 1</a></ytm-rich-item-renderer>
+      <ytm-rich-section-renderer id="shorts-shelf"><ytm-shorts-lockup-view-model><a href="/shorts/BBBBBBBBBBB">Short 1</a></ytm-shorts-lockup-view-model></ytm-rich-section-renderer>
+      <ytm-rich-item-renderer id="video-short"><a href="/shorts/CCCCCCCCCCC">Short as video</a></ytm-rich-item-renderer>
+    </ytm-rich-grid-renderer>
+  </ytm-browse>
+  <ytm-pivot-bar-renderer>
+    <ytm-pivot-bar-item-renderer id="pivot-home"><a href="/">Accueil</a></ytm-pivot-bar-item-renderer>
+    <ytm-pivot-bar-item-renderer id="pivot-shorts"><div>Shorts</div></ytm-pivot-bar-item-renderer>
+    <ytm-pivot-bar-item-renderer id="pivot-subs"><a href="/feed/subscriptions">Abonnements</a></ytm-pivot-bar-item-renderer>
+  </ytm-pivot-bar-renderer>
+  <script>
+    window.__spa = { go(to) { history.pushState({}, '', to); window.dispatchEvent(new Event('rf-test-nav')); } };
+  </script>
+</body></html>

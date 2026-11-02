@@ -9,8 +9,8 @@ final class RoutePolicyTests: XCTestCase {
 
     // MARK: - Vector loading
 
-    private func vectorsURL() -> URL? {
-        if let url = Bundle(for: RoutePolicyTests.self).url(forResource: "policy", withExtension: "json") {
+    private func vectorsURL(_ name: String) -> URL? {
+        if let url = Bundle(for: RoutePolicyTests.self).url(forResource: name, withExtension: "json") {
             return url
         }
         // Fallback: simulator tests can read the checkout directly.
@@ -18,18 +18,21 @@ final class RoutePolicyTests: XCTestCase {
             .deletingLastPathComponent()   // ReelFreeTests
             .deletingLastPathComponent()   // ios
             .deletingLastPathComponent()   // repo root
-        let url = repo.appendingPathComponent("tests/vectors/policy.json")
+        let url = repo.appendingPathComponent("tests/vectors/\(name).json")
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
+    // JSON booleans decode as a dedicated NSNumber subclass (__NSCFBoolean on Apple platforms).
+    private static let boolNumberType = type(of: NSNumber(value: true))
+
     private static func isJSONBool(_ v: Any?) -> Bool {
         guard let n = v as? NSNumber else { return false }
-        return CFGetTypeID(n) == CFBooleanGetTypeID()
+        return type(of: n) == boolNumberType
     }
 
     private static func isJSONNumber(_ v: Any?) -> Bool {
         guard let n = v as? NSNumber else { return false }
-        return CFGetTypeID(n) != CFBooleanGetTypeID()
+        return type(of: n) != boolNumberType
     }
 
     private static func context(from json: [String: Any]) -> PolicyContext {
@@ -71,16 +74,29 @@ final class RoutePolicyTests: XCTestCase {
     }
 
     func testSharedVectors() throws {
-        guard let url = vectorsURL() else {
+        guard let url = vectorsURL("policy") else {
             XCTFail("tests/vectors/policy.json not found (bundle resource or checkout)")
             return
         }
+        try runVectors(url, defaultScript: "instagram")
+    }
+
+    /// SPEC-iOS amendment 3: YouTube vectors, same format, produced by rf-web.
+    func testYouTubeVectors() throws {
+        guard let url = vectorsURL("youtube") else {
+            throw XCTSkip("tests/vectors/youtube.json not published yet")
+        }
+        try runVectors(url, defaultScript: "youtube")
+    }
+
+    private func runVectors(_ url: URL, defaultScript: String) throws {
+        let file = url.lastPathComponent
         let data = try Data(contentsOf: url)
         guard let vectors = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            XCTFail("policy.json must be an array of objects")
+            XCTFail("\(file) must be an array of objects")
             return
         }
-        XCTAssertFalse(vectors.isEmpty, "policy.json is empty")
+        XCTAssertFalse(vectors.isEmpty, "\(file) is empty")
 
         for (i, v) in vectors.enumerated() {
             let name = (v["name"] as? String) ?? "vector #\(i)"
@@ -89,7 +105,7 @@ final class RoutePolicyTests: XCTestCase {
                 continue
             }
             let ctxJSON = v["ctx"] as? [String: Any] ?? [:]
-            let script = (v["script"] as? String) ?? "instagram"
+            let script = (v["script"] as? String) ?? defaultScript
 
             var actual: [String: Any?] = [:]
             if script == "youtube" {

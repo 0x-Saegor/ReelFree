@@ -60,7 +60,7 @@ Aucune source publique ne décrit le DOM mobile à 414 px. Tout ce qui suit est 
 
 À éviter :
 - Les classes atomiques (`x78zum5`, `xh8yej3`…). Elles changent à chaque déploiement (X2).
-- Les correspondances de texte. Tous les projets publics sont en anglais seulement, alors qu'Arthur a Instagram **en français** (✅ la page de login est en français).
+- Les correspondances de texte. Tous les projets publics sont en anglais seulement, alors que l'utilisateur a Instagram **en français** (✅ la page de login est en français).
 - Si on garde un critère textuel, il faut une liste FR + EN, utilisée seulement en secours.
 
 ## T03 — Reel reçu en DM
@@ -92,7 +92,7 @@ Conséquence pour @rf-core : le jeton D2 doit être posé **au clic** (capture s
 - https://raw.githubusercontent.com/BevizLaszlo/UBlock-Filters-for-Social-Media/main/filterlist.txt
 - https://github.com/SysAdminDoc/HushGram
 
-## Checklist T17 (site réel, Arthur connecté)
+## Checklist T17 (site réel, utilisateur connecté)
 - [ ] Barre du bas à 414 px : `href` réels des onglets, présence de `role`/`aria-label`, libellés FR
 - [ ] `/reels/<id>/` : redirige vers `/reel/<id>/` ou non ?
 - [ ] Fil : `main article` présent ? Comment distinguer un reel (`a[href^="/reel/"]`) ?

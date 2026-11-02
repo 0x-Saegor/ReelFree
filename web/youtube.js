@@ -1,18 +1,12 @@
-// ==UserScript==
-// @name         ReelFree YouTube
-// @namespace    reelfree.local
-// @version      0.1.0
-// @description  YouTube without Shorts: Shorts tab and shelves hidden, /shorts/<id> opened as a regular video.
-// @match        https://m.youtube.com/*
-// @match        https://www.youtube.com/*
-// @run-at       document-start
-// @noframes
-// @grant        none
-// ==/UserScript==
-
 /*
+ * ReelFree YouTube — Shorts tab and shelves hidden, /shorts/<id> opened as a regular video.
+ *
+ * Injected by the iOS app at document-start, main frame only, in WKContentWorld.defaultClient,
+ * after `window.RF_CONFIG = {...}` (docs/SPEC-iOS.md; key used here: ytHideHomeFeed).
+ * Without window.webkit (Node, Playwright) it runs standalone with CONFIG below.
+ *
  * Security rules (see CLAUDE.md): no network, no dynamic code, no HTML-string DOM sinks,
- * storage: one sessionStorage flag "<videoId>:<ts>" (Shorts loop guard), never read user content (only URL paths and structural selectors),
+ * storage: one sessionStorage flag "<videoId>:<ts>" (Shorts loop guard, standalone only), never read user content (only URL paths and structural selectors),
  * fail-closed: the page stays masked until the current route is allowed.
  */
 (function () {
@@ -26,6 +20,7 @@
     hideShorts: true       // hide Shorts tab, shelves and entries (redirects of /shorts/<id> always apply)
   };
 
+  var VERSION = '0.2.0';
   var POLL_MS = 250;
 
   // ---------------------------------------------------------------------------
@@ -71,11 +66,14 @@
     if (typeof path !== 'string') return hide('Y-invalid');
 
     var p = path.split('?')[0].split('#')[0];
+    // Encoded separators or dot-segments would make the decoded segments differ from the router's.
+    if (/%2f|%5c|%2e%2e/i.test(p)) return hide('Y-path');
     try {
       p = decodeURIComponent(p);
     } catch (e) {
       return hide('Y-decode');
     }
+    if (/\\/.test(p) || /(^|\/)\.\.?(\/|$)/.test(p)) return hide('Y-path');
     // Drop ';params' from segments so matrix-style variants cannot slip through.
     var raw = p.split('/')
       .map(function (s) { return s.split(';')[0]; })
@@ -109,10 +107,29 @@
   // ---------------------------------------------------------------------------
   // Node export for unit tests. Nothing below runs outside a browser.
   // ---------------------------------------------------------------------------
+  // App settings (window.RF_CONFIG, {type: "config"} messages): known keys with valid values only.
+  // Returns the CONFIG keys that changed.
+  function mergeConfig(into, from) {
+    var changed = [];
+    if (!from || typeof from !== 'object') return changed;
+    if (typeof from.ytHideHomeFeed === 'boolean' && into.hideHomeFeed !== from.ytHideHomeFeed) {
+      into.hideHomeFeed = from.ytHideHomeFeed;
+      changed.push('hideHomeFeed');
+    }
+    return changed;
+  }
+
+  // Avenant 1 (docs/SPEC-iOS.md): only youtube.com and its subdomains; a no-op on any other host
+  // (Google sign-in pages share the app's bound domains).
+  function hostAllowed(host) {
+    return typeof host === 'string' && /(^|\.)youtube\.com$/.test(host.toLowerCase());
+  }
+
   if (typeof module === 'object' && module && module.exports) {
-    module.exports = { decideYT: decideYT, CONFIG: CONFIG };
+    module.exports = { decideYT: decideYT, hostAllowed: hostAllowed, mergeConfig: mergeConfig, CONFIG: CONFIG, VERSION: VERSION };
   }
   if (typeof document === 'undefined' || typeof window === 'undefined') return;
+  if (!hostAllowed(window.location.hostname)) return;
 
   // ---------------------------------------------------------------------------
   // CSS. Custom-element tag names and attributes only, never obfuscated classes.
@@ -120,6 +137,19 @@
   // that rule only, the others survive.
   // ---------------------------------------------------------------------------
   var root = null;   // set in start(): WebKit may run us before <html> exists
+
+  // Bridge to the app (docs/SPEC-iOS.md). Present only inside the iOS app.
+  var BRIDGE = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.reelfree);
+  function post(msg) {
+    if (!BRIDGE) return;
+    try { window.webkit.messageHandlers.reelfree.postMessage(msg); } catch (e) { /* app gone: standalone */ }
+  }
+  function reportError(where, e) {
+    post({ type: 'error', where: where, message: String((e && e.name) || 'Error') });
+  }
+  if (BRIDGE) {
+    try { mergeConfig(CONFIG, window.RF_CONFIG); } catch (e) { reportError('config', e); }
+  }
   var HIDE = ' { display: none !important; }';
   var S = CONFIG.hideShorts ? 'html[data-rfy-shorts="hide"] ' : null;
   var SHORTS_LINK = 'a[href^="/shorts"], a[href*="youtube.com/shorts/"]';
@@ -201,6 +231,7 @@
   var masked = true;
   var currentMode = 'blocked';
   var lastPath = null;
+  var viaPopstate = false;   // current evaluation comes from history traversal (Avenant 2)
 
   // Loop guard: if YouTube itself sends /watch?v=<id> back to /shorts/<id>, we would bounce forever.
   // A redirect of the SAME Short less than 5 s after the previous one stops and stays masked with a
@@ -212,13 +243,18 @@
     var id = to.slice('/watch?v='.length);
     var now = Date.now();
     var prev = lastShorts;
-    try {
-      var m = /^([A-Za-z0-9_-]{11}):(\d{1,16})$/.exec(window.sessionStorage.getItem(SHORTS_LOOP_KEY) || '');
-      if (m && Number(m[2]) > prev.at) prev = { id: m[1], at: Number(m[2]) };
-    } catch (e) { /* memory only */ }
+    // F6 (B05 review): in the app nothing is written to web storage, the guard is memory only.
+    if (!BRIDGE) {
+      try {
+        var m = /^([A-Za-z0-9_-]{11}):(\d{1,16})$/.exec(window.sessionStorage.getItem(SHORTS_LOOP_KEY) || '');
+        if (m && Number(m[2]) > prev.at) prev = { id: m[1], at: Number(m[2]) };
+      } catch (e) { /* memory only */ }
+    }
     if (prev.id === id && now - prev.at < SHORTS_LOOP_MS) return false;
     lastShorts = { id: id, at: now };
-    try { window.sessionStorage.setItem(SHORTS_LOOP_KEY, id + ':' + now); } catch (e) { /* memory only */ }
+    if (!BRIDGE) {
+      try { window.sessionStorage.setItem(SHORTS_LOOP_KEY, id + ':' + now); } catch (e) { /* memory only */ }
+    }
     return true;
   }
 
@@ -280,6 +316,7 @@
     try {
       d = decideYT(window.location.pathname, window.location.search, { config: CONFIG });
     } catch (e) {
+      reportError('decide', e);
       d = hide('Y-error');
     }
     currentMode = d.mode;
@@ -310,7 +347,21 @@
     var path = window.location.pathname;
     if (path === lastPath) return;
     lastPath = path;
+    post(viaPopstate ? { type: 'route', path: path, via: 'popstate' } : { type: 'route', path: path });
     evaluate();
+  }
+
+  // Native -> JS: window.reelfree.onNative(msg). Only {type: "config"} matters here; DM messages
+  // are Instagram-only and ignored, like anything unknown or malformed.
+  function onNative(msg) {
+    if (!msg || typeof msg !== 'object' || msg.type !== 'config') return;
+    try {
+      if (!mergeConfig(CONFIG, msg.config).length) return;
+      lastPath = null;   // re-decide the current route with the new settings
+      checkRoute();
+    } catch (e) {
+      reportError('onNative', e);
+    }
   }
 
   // Click capture: a link to a Short opens the regular watch page instead (no SPA transition).
@@ -357,10 +408,20 @@
   // --- Boot ------------------------------------------------------------------
   function start() {
     root = document.documentElement;
+    if (BRIDGE) {
+      try {
+        Object.defineProperty(window, 'reelfree', {
+          value: Object.freeze({ onNative: onNative, version: VERSION }), writable: false, configurable: false
+        });
+      } catch (e) { reportError('bridge', e); }
+    }
     applyAttrs();   // masked = true at this point
     styleEl = injectStyle('reelfree-yt-style', CSS);
     checkRoute();
-    window.addEventListener('popstate', checkRoute, true);
+    window.addEventListener('popstate', function () {
+      viaPopstate = true;
+      try { checkRoute(); } finally { viaPopstate = false; }
+    }, true);
     window.addEventListener('click', onClick, true);
     // YouTube SPA navigation events (desktop); harmless if never fired.
     document.addEventListener('yt-navigate-start', checkRoute, true);
@@ -370,6 +431,7 @@
     new MutationObserver(applyAttrs).observe(root, {
       attributes: true, attributeFilter: ['data-reelfree', 'data-rfy-mode', 'data-rfy-shorts']
     });
+    post({ type: 'ready', script: 'youtube', version: VERSION });
   }
 
   if (document.documentElement) {

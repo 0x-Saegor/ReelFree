@@ -63,11 +63,12 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
 
         scriptSource = Self.loadScript(site.scriptResource)
         proxy.target = self
-        config.userContentController.add(proxy, contentWorld: .defaultClient, name: Self.handlerName)
+        webView.configuration.userContentController.add(proxy, contentWorld: .defaultClient, name: Self.handlerName)
         installUserScripts()
 
         webView.customUserAgent = Self.safariUserAgent()
         webView.allowsLinkPreview = false
+        webView.isInspectable = false
         webView.allowsBackForwardNavigationGestures = true
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -156,8 +157,16 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
 
     private func observeWebView() {
         observations.append(webView.observe(\.url, options: [.new]) { [weak self] _, _ in
-            DispatchQueue.main.async {
-                self?.evaluateCurrentURL()
+            // WebKit reports URL changes on the main thread: decide (and mask) synchronously,
+            // before the next frame. The async hop is only a fallback.
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    self?.evaluateCurrentURL()
+                }
+            } else {
+                DispatchQueue.main.async {
+                    self?.evaluateCurrentURL()
+                }
             }
         })
         observations.append(webView.observe(\.canGoBack, options: [.initial, .new]) { [weak self] _, _ in
@@ -241,6 +250,8 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
 
     /// Evaluates a top-level document URL of this tab's site and applies the D2 side effects.
     private func verdict(for url: URL) -> Verdict {
+        // Sign-in pages: no route policy there (amendment 1); the injected scripts are no-op.
+        if site.isAuxiliaryURL(url) { return .allow }
         guard site.isDocumentURL(url), let path = Self.rawPath(url) else { return .hide }
         switch site {
         case .instagram:
@@ -281,9 +292,15 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
 
     /// KVO / `route` message path: the page already shows this URL.
     func evaluateCurrentURL() {
-        guard let url = webView.url else { return }
-        let scheme = url.scheme?.lowercased()
-        if scheme == "about" { return }   // about:blank before the first load
+        // Fail-closed (F1): no URL, or any about: page other than the initial about:blank, is masked.
+        guard let url = webView.url else {
+            setMasked(true)
+            return
+        }
+        if url.scheme?.lowercased() == "about" {
+            if url.absoluteString.lowercased() != "about:blank" { setMasked(true) }
+            return
+        }
         switch verdict(for: url) {
         case .allow:
             setMasked(false)
@@ -306,14 +323,16 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         }
 
         // New window (target=_blank, window.open): never a second web view.
+        let userInitiated = navigationAction.navigationType == .linkActivated
         guard let frame = navigationAction.targetFrame else {
             decisionHandler(.cancel)
-            openOutsideOrHere(url, userInitiated: true)
+            openOutsideOrHere(url, userInitiated: userInitiated)
             return
         }
 
         if !frame.isMainFrame {
-            if scheme == "about" || scheme == "blob" || scheme == "data" || site.isFrameURL(url) {
+            // Only blank/srcdoc documents and https frames of this site (no data:/blob: documents).
+            if Self.isBlankDocument(url) || site.isFrameURL(url) {
                 decisionHandler(.allow)
             } else {
                 decisionHandler(.cancel)
@@ -322,7 +341,7 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         }
 
         if scheme == "about" {
-            decisionHandler(.allow)
+            decisionHandler(Self.isBlankDocument(url) ? .allow : .cancel)
             return
         }
 
@@ -330,16 +349,25 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         if site == .instagram, url.host?.lowercased() == "l.instagram.com" {
             decisionHandler(.cancel)
             if let target = Self.shimTarget(url) {
-                openOutsideOrHere(target, userInitiated: true)
+                openOutsideOrHere(target, userInitiated: userInitiated)
             }
+            return
+        }
+
+        if site.isAuxiliaryURL(url) {
+            decisionHandler(.allow)
             return
         }
 
         if !site.isDocumentURL(url) {
             decisionHandler(.cancel)
-            let userInitiated = navigationAction.navigationType == .linkActivated
             openOutsideOrHere(url, userInitiated: userInitiated)
             return
+        }
+
+        // D2: history traversal never spends a DM token (Back right after a tap in a thread).
+        if navigationAction.navigationType == .backForward {
+            dmToken = nil
         }
 
         switch verdict(for: url) {
@@ -353,6 +381,13 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
             decisionHandler(.cancel)
             setMasked(true)
         }
+    }
+
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        // No downloads or files the web view cannot render.
+        decisionHandler(navigationResponse.canShowMIMEType ? .allow : .cancel)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -382,12 +417,17 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
                  for navigationAction: WKNavigationAction,
                  windowFeatures: WKWindowFeatures) -> WKWebView? {
         if let url = navigationAction.request.url {
-            openOutsideOrHere(url, userInitiated: true)
+            openOutsideOrHere(url, userInitiated: navigationAction.navigationType == .linkActivated)
         }
         return nil
     }
 
     // MARK: - Links
+
+    private static func isBlankDocument(_ url: URL) -> Bool {
+        let s = url.absoluteString.lowercased()
+        return s == "about:blank" || s == "about:srcdoc"
+    }
 
     private static func shimTarget(_ url: URL) -> URL? {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -400,7 +440,7 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
     /// user action. Anything else (custom schemes, app deep links): dropped.
     private func openOutsideOrHere(_ url: URL, userInitiated: Bool) {
         let scheme = url.scheme?.lowercased()
-        if site.isDocumentURL(url) {
+        if site.isDocumentURL(url) || site.isAuxiliaryURL(url) {
             webView.load(URLRequest(url: url))
             return
         }
@@ -427,7 +467,8 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
             } else {
                 sendToJS(["type": "dmReelDenied", "id": id])
             }
-        case .route:
+        case .route(let viaHistory):
+            if viaHistory { dmToken = nil }
             evaluateCurrentURL()
         case .ready:
             sendToJS(["type": "config", "config": settings.jsConfig])

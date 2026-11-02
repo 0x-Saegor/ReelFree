@@ -230,11 +230,18 @@
   // ---------------------------------------------------------------------------
   // Node export for unit tests. Nothing below runs outside a browser.
   // ---------------------------------------------------------------------------
+  // Avenant 1 (docs/SPEC-iOS.md): App-Bound Domains cover sibling hosts (CDN, YouTube, Google
+  // sign-in); this script only acts on instagram.com and its subdomains, and is a no-op elsewhere.
+  function hostAllowed(host) {
+    return typeof host === 'string' && /(^|\.)instagram\.com$/.test(host.toLowerCase());
+  }
+
   if (typeof module === 'object' && module && module.exports) {
-    module.exports = { decide: decide, mediaIdFromPath: mediaIdFromPath, feedVariantTarget: feedVariantTarget,
+    module.exports = { decide: decide, hostAllowed: hostAllowed, mediaIdFromPath: mediaIdFromPath, feedVariantTarget: feedVariantTarget,
       mergeConfig: mergeConfig, CONFIG: CONFIG, TOKEN_KEY: TOKEN_KEY, VERSION: VERSION };
   }
   if (typeof document === 'undefined' || typeof window === 'undefined') return;
+  if (!hostAllowed(window.location.hostname)) return;
 
 
   // ---------------------------------------------------------------------------
@@ -375,33 +382,45 @@
     try { window.sessionStorage.setItem(TOKEN_KEY, id + ':' + Date.now()); } catch (e) { /* ignore */ }
   }
 
+  // Flags (F6, B05 review): in the app nothing is written to web storage; flags live in this
+  // document's memory (lost on a full reload). Standalone: sessionStorage, "reelfree:" keys only.
+  var memFlags = Object.create(null);
+  function flagGet(key) {
+    if (BRIDGE) return Object.prototype.hasOwnProperty.call(memFlags, key) ? memFlags[key] : null;
+    return window.sessionStorage.getItem(key);
+  }
+  function flagSet(key, value) {
+    if (BRIDGE) { memFlags[key] = value; return; }
+    window.sessionStorage.setItem(key, value);
+  }
+
   var VARIANT_KEY = 'reelfree:feed-variant-at';
   function variantRecentlyTried() {
     try {
-      var v = Number(window.sessionStorage.getItem(VARIANT_KEY) || 0);
+      var v = Number(flagGet(VARIANT_KEY) || 0);
       return Date.now() - v < 2000;   // a real loop reloads well within 2 s
     } catch (e) {
       return true;   // no storage: never risk a redirect loop
     }
   }
   function markVariantTried() {
-    try { window.sessionStorage.setItem(VARIANT_KEY, String(Date.now())); } catch (e) { /* ignore */ }
+    try { flagSet(VARIANT_KEY, String(Date.now())); } catch (e) { /* ignore */ }
   }
 
   // S1: feed counters persist for the tab's life (numbers only), so DM <-> feed round trips and
-  // reloads never reset the cap. Shortcode keys stay in memory.
+  // reloads never reset the cap (standalone; in the app, for the document's life). Shortcode keys stay in memory.
   var FEED_COUNT_KEY = 'reelfree:feed-count';
   var FEED_SEEN_KEY = 'reelfree:feed-seen';
   function readCount(key) {
     try {
-      var v = Number(window.sessionStorage.getItem(key) || 0);
+      var v = Number(flagGet(key) || 0);
       return isFinite(v) && v >= 0 ? Math.floor(v) : 0;
     } catch (e) {
       return 0;
     }
   }
   function writeCount(key, n) {
-    try { window.sessionStorage.setItem(key, String(n)); } catch (e) { /* memory value still applies */ }
+    try { flagSet(key, String(n)); } catch (e) { /* memory value still applies */ }
   }
 
   function clearToken() {
@@ -639,8 +658,7 @@
 
   function onPopstate() {
     state.viaPopstate = true;
-    checkRoute();
-    state.viaPopstate = false;
+    try { checkRoute(); } finally { state.viaPopstate = false; }
   }
 
   // ---------------------------------------------------------------------------
@@ -752,7 +770,8 @@
     if (path === state.lastPath) return;
     state.prevPath = state.lastPath;
     state.lastPath = path;
-    post({ type: 'route', path: path });
+    // Avenant 2: history traversal is flagged so the app drops its DM token too.
+    post(state.viaPopstate ? { type: 'route', path: path, via: 'popstate' } : { type: 'route', path: path });
     evaluate();
   }
 
@@ -765,7 +784,6 @@
         if (!mergeConfig(CONFIG, msg.config).length) return;
         state.lastPath = null;   // re-decide the current route with the new settings
         checkRoute();
-        if (!masked) onRouteAllowed();
       } else if (msg.type === 'dmReelDenied') {
         // Fail closed: the app refused this reel, drop any local permission for it.
         if (typeof msg.id === 'string' && memToken && memToken.id === msg.id) clearToken();
@@ -852,8 +870,7 @@
       state.lastPath = null;
       state.activeReel = null;
       state.viaPopstate = true;
-      checkRoute();
-      state.viaPopstate = false;
+      try { checkRoute(); } finally { state.viaPopstate = false; }
     });
     window.addEventListener('click', onClick, true);
     window.addEventListener('wheel', blockScroll, { capture: true, passive: false });

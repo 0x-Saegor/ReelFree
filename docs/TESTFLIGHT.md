@@ -1,6 +1,6 @@
 # ReelFree — Guide TestFlight (pour le titulaire du compte Apple Developer)
 
-Merci de prêter ton compte ! Ce guide liste tout ce qu'il faut faire **une seule fois** pour que la CI GitHub publie ReelFree sur TestFlight, puis l'installe sur l'iPhone d'Arthur.
+Merci de prêter ton compte ! Ce guide liste tout ce qu'il faut faire **une seule fois** pour que la CI GitHub publie ReelFree sur TestFlight, puis l'installe sur l'iPhone du testeur.
 Il faut compter environ 30 minutes. **Aucun Mac n'est nécessaire** : tout se fait sur le web (developer.apple.com et appstoreconnect.apple.com), et la compilation tourne sur GitHub Actions.
 
 > L'app n'est **jamais** publiée sur l'App Store. Elle reste en **test interne TestFlight**, ce qui ne demande aucune revue Apple.
@@ -13,8 +13,8 @@ Il faut compter environ 30 minutes. **Aucun Mac n'est nécessaire** : tout se fa
 | Identifiant d'app (bundle id) | developer.apple.com | identifier l'app, par exemple `com.tonnom.reelfree` |
 | Fiche d'app | App Store Connect | recevoir les builds TestFlight |
 | Clé API App Store Connect (`.p8`) | App Store Connect | permettre à la CI de signer et d'envoyer les builds |
-| 5 secrets GitHub | dépôt GitHub d'Arthur | transmettre ces informations à la CI |
-| Arthur, testeur interne | App Store Connect | lui permettre d'installer l'app avec TestFlight |
+| 5 secrets GitHub | dépôt GitHub du projet | transmettre ces informations à la CI |
+| Le testeur, en testeur interne | App Store Connect | lui permettre d'installer l'app avec TestFlight |
 
 Les certificats et les profils de provisionnement **ne sont pas à créer** : Xcode les gère tout seul dans la CI (signature automatique, certificat de distribution géré dans le cloud par Apple).
 
@@ -55,7 +55,7 @@ Récupère aussi ton **Team ID** (10 caractères) dans <https://developer.apple.
    - l'**Issuer ID** (un UUID, affiché en haut de la page) : c'est le secret `ASC_ISSUER_ID`.
 
 > ⚠️ Cette clé donne un accès Admin à ton compte App Store Connect. Ne l'envoie **ni par mail, ni par messagerie, ni par un lien de partage**.
-> Le plus sûr : tu saisis toi-même les secrets dans GitHub (étape 4). Arthur t'ajoute pour ça comme collaborateur du dépôt.
+> Le plus sûr : tu saisis toi-même les secrets dans GitHub (étape 4). Le propriétaire du dépôt t'ajoute pour ça comme collaborateur du dépôt.
 > Une fois les secrets enregistrés, supprime le fichier `.p8` de ton disque, ou range-le dans un gestionnaire de mots de passe.
 
 ## 4. Enregistrer les secrets GitHub
@@ -82,38 +82,39 @@ Ensuite, dans le dépôt GitHub : **Settings**, **Environments**, **New environm
 
 Ces secrets ne sont jamais affichés dans les logs, GitHub les masque. Le workflow écrit la clé dans un fichier temporaire du runner et l'efface à la fin du job.
 
-## 5. Ajouter Arthur comme testeur interne
+## 5. Ajouter le testeur interne
 
-1. **Users and Access**, onglet **People**, bouton **+** : invite Arthur avec son adresse Apple ID.
+1. **Users and Access**, onglet **People**, bouton **+** : invite le testeur avec son adresse Apple ID.
    - Rôle : le plus restreint possible (par exemple **Developer** ou **Marketing**). Tous les rôles peuvent être testeurs internes.
    - **Apps** : limite l'accès à ReelFree seulement.
-2. Arthur accepte l'invitation qu'il reçoit par mail.
-3. Dans **Apps**, **ReelFree**, onglet **TestFlight**, section **Internal Testing**, clique sur **+** pour créer un groupe, par exemple `Arthur` :
+2. Le testeur accepte l'invitation qu'il reçoit par mail.
+3. Dans **Apps**, **ReelFree**, onglet **TestFlight**, section **Internal Testing**, clique sur **+** pour créer un groupe, par exemple `Testeurs` :
    - coche **Enable automatic distribution**, pour que chaque nouveau build lui arrive sans intervention ;
-   - ajoute Arthur au groupe.
-4. Sur son iPhone, Arthur installe l'app **TestFlight** depuis l'App Store, puis accepte l'invitation ReelFree.
+   - ajoute le testeur au groupe.
+4. Sur son iPhone, le testeur installe l'app **TestFlight** depuis l'App Store, puis accepte l'invitation ReelFree.
 
 ## 6. Premier build
 
 1. Dans GitHub : **Actions**, workflow **testflight**, **Run workflow** (branche `main`).
 2. Le workflow lance d'abord les tests (`ci.yml`), puis l'archive et l'envoi. Compte 15 à 25 minutes.
-3. Apple traite ensuite le build pendant 10 à 30 minutes. Il apparaît alors dans l'onglet TestFlight, puis chez Arthur.
+3. Apple traite ensuite le build pendant 10 à 30 minutes. Il apparaît alors dans l'onglet TestFlight, puis chez le testeur.
 4. Le build porte le numéro `run_number` du workflow. Le numéro de version vient de `ios/project.yml`, ou du tag `vX.Y.Z` s'il y en a un.
 
 **Conformité export** : l'app n'utilise que le HTTPS du système. L'`Info.plist` déclare donc `ITSAppUsesNonExemptEncryption = NO`, et TestFlight ne pose pas la question. Si TestFlight affiche quand même « Missing Compliance », réponds *None of the algorithms mentioned above*.
 
 ## 7. Ensuite : rien à faire
 
-- Un build TestFlight **expire au bout de 90 jours**. Le workflow se relance automatiquement **le 1er de chaque mois** : Arthur a toujours un build valide.
+- Un build TestFlight **expire au bout de 90 jours**. Le workflow se relance automatiquement **le 1er de chaque mois** : le testeur a toujours un build valide.
 - Un tag `vX.Y.Z` poussé sur le dépôt déclenche aussi un build.
-- ⚠️ Sur un dépôt **public**, GitHub désactive les workflows planifiés après 60 jours sans activité. Garde le dépôt **privé**, ou réactive le workflow dans l'onglet Actions si GitHub l'a désactivé.
+- ⚠️ Le dépôt est **public**. GitHub y désactive les workflows planifiés après 60 jours sans commit, et prévient par mail. Il suffit alors d'aller dans **Actions**, **testflight**, puis **Enable workflow**, ou de pousser un commit. Sinon, le build expire 90 jours après le dernier envoi.
+- Dépôt public, donc logs publics : la CI n'affiche que les lignes d'erreur filtrées (pas le nom de l'identité de signature) et ne publie aucun artefact de l'archive. Les secrets restent masqués par GitHub, et les PR venant de forks n'y ont pas accès.
 - L'abonnement Apple Developer (99 $/an) doit rester actif. S'il expire, les builds TestFlight cessent de fonctionner.
 
 ## 8. Arrêter ou révoquer
 
 - **Révoquer la clé** : Users and Access, Integrations, App Store Connect API, **Revoke** sur `ReelFree CI`. La CI ne peut alors plus rien envoyer.
 - Supprime ensuite l'environnement `testflight` dans GitHub.
-- Pour retirer l'app à Arthur : TestFlight, groupe interne, retire-le du groupe, ou fais **Expire Build**.
+- Pour retirer l'app au testeur : TestFlight, groupe interne, retire-le du groupe, ou fais **Expire Build**.
 
 ## Dépannage
 
@@ -124,5 +125,5 @@ Ces secrets ne sont jamais affichés dans les logs, GitHub les masque. Le workfl
 | `Cloud signing permission error` | Clé API sans rôle Admin | Recréer la clé avec l'accès **Admin** |
 | `No profiles for '<bundle id>' were found` / `No Account for Team` | `APPLE_TEAM_ID` ou `RF_BUNDLE_ID` faux, ou App ID non enregistré | Étapes 1 et 4 |
 | `Error Downloading App Information` / `No suitable application records were found` | Pas de fiche d'app pour ce bundle id dans App Store Connect | Étape 2 |
-| `The bundle version must be higher than the previously uploaded version` | Numéro de build déjà utilisé (dépôt recréé, `run_number` repart à 1) | Prévenir Arthur : il ajoute un décalage au numéro de build dans `testflight.yml` |
-| Le build n'apparaît pas chez Arthur | Il n'est pas dans le groupe interne, ou la distribution automatique est désactivée | Étape 5 |
+| `The bundle version must be higher than the previously uploaded version` | Numéro de build déjà utilisé (dépôt recréé, `run_number` repart à 1) | Prévenir le mainteneur : il ajoute un décalage au numéro de build dans `testflight.yml` |
+| Le build n'apparaît pas chez le testeur | Il n'est pas dans le groupe interne, ou la distribution automatique est désactivée | Étape 5 |

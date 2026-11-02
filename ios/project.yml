@@ -29,6 +29,7 @@ targets:
       - path: ReelFree
         excludes:
           - Resources/PrivacyInfo.xcprivacy
+          - Resources/Info.plist
       - path: ReelFree/Resources/PrivacyInfo.xcprivacy
         buildPhase: resources
       - path: ../web/instagram.js
@@ -58,6 +59,9 @@ targets:
       # Shared vectors owned by rf-web (docs/SPEC-iOS.md). Optional so a missing file never
       # breaks project generation; the test fails explicitly if it cannot find them.
       - path: ../tests/vectors/policy.json
+        buildPhase: resources
+        optional: true
+      - path: ../tests/vectors/youtube.json
         buildPhase: resources
         optional: true
     dependencies:

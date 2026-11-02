@@ -4,7 +4,7 @@ import Foundation
 /// Anything that does not match exactly is dropped.
 enum BridgeMessage: Equatable {
     case dmReelOpen(id: String)
-    case route
+    case route(viaHistory: Bool)
     case ready(script: String, version: String)
     case error
 
@@ -21,7 +21,8 @@ enum BridgeMessage: Equatable {
             return .dmReelOpen(id: id)
         case "route":
             // The path itself is not trusted: the guard re-reads webView.url.
-            return .route
+            // Optional `via: "popstate"` (history traversal) makes the native side drop its DM token.
+            return .route(viaHistory: (dict["via"] as? String) == "popstate")
         case "ready":
             guard let script = dict["script"] as? String, script == "instagram" || script == "youtube" else { return nil }
             let version = (dict["version"] as? String) ?? ""
