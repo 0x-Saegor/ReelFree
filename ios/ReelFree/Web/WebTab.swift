@@ -13,6 +13,51 @@ final class ScriptMessageProxy: NSObject, WKScriptMessageHandler {
     }
 }
 
+/// D07: the web view sits inside the *window* safe area, whatever bars SwiftUI shows over it, so
+/// showing or hiding the tab bar never resizes the page. Its own safe-area insets are zero for the
+/// same reason (no viewport or `env(safe-area-inset-*)` change when the tab bar appears).
+final class ReelFreeWebView: WKWebView {
+    override var safeAreaInsets: UIEdgeInsets { .zero }
+}
+
+/// Lays its content out inside the window safe area (frames only, recomputed on layout changes).
+final class WebHostView: UIView {
+    let content = UIView()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        content.frame = bounds
+        addSubview(content)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        var frame = bounds
+        if let window = window {
+            let insets = window.safeAreaInsets
+            let r = convert(bounds, to: window)
+            let top = max(0, insets.top - r.minY)
+            let left = max(0, insets.left - r.minX)
+            let bottom = max(0, r.maxY - (window.bounds.height - insets.bottom))
+            let right = max(0, r.maxX - (window.bounds.width - insets.right))
+            frame = bounds.inset(by: UIEdgeInsets(top: top, left: left, bottom: bottom, right: right))
+        }
+        if content.frame != frame { content.frame = frame }
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        setNeedsLayout()
+    }
+
+    override func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        setNeedsLayout()
+    }
+}
+
 /// One web tab: a WKWebView locked to one site, its native route guard and the JS bridge.
 ///
 /// The native guard is authoritative (docs/SPEC-iOS.md):
@@ -20,22 +65,33 @@ final class ScriptMessageProxy: NSObject, WKScriptMessageHandler {
 ///  2. every change of webView.url (KVO), which covers SPA pushState navigations;
 ///  3. the `route` message from the injected script (redundancy).
 @MainActor
-final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
+final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, UIGestureRecognizerDelegate {
 
     static let handlerName = "reelfree"
 
     let site: Site
     private let settings: AppSettings
     let webView: WKWebView
-    let hostView = UIView()
+    let hostView = WebHostView()
+    /// D07: a tap in the page hides the native bars.
+    var onPageTap: (() -> Void)?
     private let maskView = UIView()
     private let maskLabel = UILabel()
     private let proxy = ScriptMessageProxy()
     private var observations: [NSKeyValueObservation] = []
     private var scriptSource: String?
+    private var pageScriptSource: String?
 
     @Published private(set) var canGoBack = false
-    @Published private(set) var isMasked = true
+    // Not @Published: no view reads it, and publishing would re-render the toolbar on every route.
+    private(set) var isMasked = true
+    private(set) var isVisible = true
+
+    // Route notifications to the injected script (amendment 4).
+    private var lastHistory: RouteVia.Snapshot<WKBackForwardListItem>?
+    private var pendingTraversal = false
+    private var pendingLoad = false
+    private var lastRouteURL: String?
 
     // D2 state, in memory only. The token is one-shot with a short TTL.
     private struct DMToken {
@@ -46,7 +102,7 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
     private var lastThread: String?
     private var activeReel: String?
 
-    init(site: Site, settings: AppSettings) {
+    init(site: Site, settings: AppSettings, ruleList: WKContentRuleList? = nil) {
         self.site = site
         self.settings = settings
 
@@ -58,10 +114,17 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         config.upgradeKnownHostsToHTTPS = true
         config.dataDetectorTypes = []
 
-        webView = WKWebView(frame: .zero, configuration: config)
+        if let ruleList = ruleList {
+            config.userContentController.add(ruleList)
+        }
+
+        webView = ReelFreeWebView(frame: .zero, configuration: config)
         super.init()
 
         scriptSource = Self.loadScript(site.scriptResource)
+        if let page = site.pageScriptResource {
+            pageScriptSource = Self.loadScript(page)
+        }
         proxy.target = self
         webView.configuration.userContentController.add(proxy, contentWorld: .defaultClient, name: Self.handlerName)
         installUserScripts()
@@ -69,7 +132,9 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         webView.customUserAgent = Self.safariUserAgent()
         webView.allowsLinkPreview = false
         webView.isInspectable = false
+        // D07: left-edge swipe = back (covers pushState entries too).
         webView.allowsBackForwardNavigationGestures = true
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.navigationDelegate = self
         webView.uiDelegate = self
 
@@ -80,8 +145,15 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         buildHostView()
         observeWebView()
 
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handlePageTap))
+        tap.cancelsTouchesInView = false
+        tap.delaysTouchesBegan = false
+        tap.delaysTouchesEnded = false
+        tap.delegate = self
+        webView.addGestureRecognizer(tap)
+
         if scriptSource != nil {
-            webView.load(URLRequest(url: site.homeURL))
+            loadDocument(site.homeURL)
         } else {
             // Fail-closed: without the protection script, the site is never shown.
             setMasked(true, message: "Script de protection introuvable.\nRéinstalle l'app.")
@@ -127,16 +199,32 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
                                        injectionTime: .atDocumentStart,
                                        forMainFrameOnly: true,
                                        in: .defaultClient))
+        // D05: the only script in the page world (YouTube ad pruning; exception reviewed in D06).
+        // No message handler exists in .page, so it cannot reach the bridge; it is optional.
+        if let page = pageScriptSource {
+            ucc.addUserScript(WKUserScript(source: page,
+                                           injectionTime: .atDocumentStart,
+                                           forMainFrameOnly: true,
+                                           in: .page))
+        }
+    }
+
+    /// D04: content blocker compiled after launch (AdBlocker); added to the live configuration.
+    func apply(ruleList: WKContentRuleList) {
+        let ucc = webView.configuration.userContentController
+        ucc.remove(ruleList)
+        ucc.add(ruleList)
     }
 
     private func buildHostView() {
         hostView.backgroundColor = .systemBackground
-        webView.frame = hostView.bounds
+        let content = hostView.content
+        webView.frame = content.bounds
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        hostView.addSubview(webView)
+        content.addSubview(webView)
 
         maskView.backgroundColor = .systemBackground
-        maskView.frame = hostView.bounds
+        maskView.frame = content.bounds
         maskView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         maskLabel.text = "Contenu masqué par ReelFree"
         maskLabel.textColor = .secondaryLabel
@@ -151,8 +239,18 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
             maskLabel.leadingAnchor.constraint(greaterThanOrEqualTo: maskView.leadingAnchor, constant: 24),
             maskLabel.trailingAnchor.constraint(lessThanOrEqualTo: maskView.trailingAnchor, constant: -24)
         ])
-        hostView.addSubview(maskView)
+        content.addSubview(maskView)
         maskView.isHidden = false
+    }
+
+    @objc private func handlePageTap() {
+        onPageTap?()
+    }
+
+    /// Observe taps only: never compete with WebKit's own recognizers.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        true
     }
 
     private func observeWebView() {
@@ -161,39 +259,91 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
             // before the next frame. The async hop is only a fallback.
             if Thread.isMainThread {
                 MainActor.assumeIsolated {
-                    self?.evaluateCurrentURL()
+                    self?.urlDidChange()
                 }
             } else {
                 DispatchQueue.main.async {
-                    self?.evaluateCurrentURL()
+                    self?.urlDidChange()
                 }
             }
         })
         observations.append(webView.observe(\.canGoBack, options: [.initial, .new]) { [weak self] _, _ in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.canGoBack = self.webView.canGoBack
+                let value = self.webView.canGoBack
+                if self.canGoBack != value { self.canGoBack = value }
             }
         })
+    }
+
+    /// Event-driven only (KVO): no timer or per-frame work on the native side.
+    private func urlDidChange() {
+        let list = webView.backForwardList
+        let snapshot = RouteVia.Snapshot(current: list.currentItem, back: list.backList, forward: list.forwardList)
+        let via = RouteVia.classify(previous: lastHistory, current: snapshot,
+                                    pendingTraversal: pendingTraversal, pendingLoad: pendingLoad)
+        lastHistory = snapshot
+        pendingTraversal = false
+        pendingLoad = false
+        // Amendment 2, native side: a history traversal never spends a DM token.
+        if via == .popstate { dmToken = nil }
+        evaluateCurrentURL()
+        notifyRoute(via)
+    }
+
+    /// Amendment 4: onNative({type:"route", path, via}) on each URL change, so the script needs no polling.
+    private func notifyRoute(_ via: RouteVia) {
+        guard let url = webView.url, site.isDocumentURL(url), let path = Self.rawPath(url) else {
+            lastRouteURL = nil
+            return
+        }
+        let key = url.absoluteString
+        if key == lastRouteURL && via != .popstate { return }   // KVO may repeat the same URL
+        lastRouteURL = key
+        sendToJS(["type": "route", "path": path, "via": via.rawValue])
+    }
+
+    /// Every document load started by the app goes through here (labelled `via: "load"`).
+    private func loadDocument(_ url: URL) {
+        pendingLoad = true
+        webView.load(URLRequest(url: url))
     }
 
     // MARK: - Toolbar actions
 
     func goBack() {
-        if webView.canGoBack { webView.goBack() }
+        guard webView.canGoBack else { return }
+        pendingTraversal = true
+        dmToken = nil
+        webView.goBack()
     }
 
     func goHome() {
         guard scriptSource != nil else { return }
-        webView.load(URLRequest(url: site.homeURL))
+        loadDocument(site.homeURL)
     }
 
     func reload() {
         guard scriptSource != nil else { return }
         if webView.url == nil {
-            webView.load(URLRequest(url: site.homeURL))
+            loadDocument(site.homeURL)
         } else {
             webView.reload()
+        }
+    }
+
+    // MARK: - Visibility
+
+    /// Hidden tab: pause, then suspend its media so nothing plays or decodes off screen.
+    /// Both calls go to the same web process in order, so no completion handler is needed.
+    func setVisible(_ visible: Bool) {
+        guard visible != isVisible else { return }
+        isVisible = visible
+        if visible {
+            webView.setAllMediaPlaybackSuspended(false, completionHandler: nil)
+        } else {
+            webView.pauseAllMediaPlayback(completionHandler: nil)
+            webView.setAllMediaPlaybackSuspended(true, completionHandler: nil)
         }
     }
 
@@ -306,7 +456,7 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
             setMasked(false)
         case .redirect(let target):
             setMasked(true)
-            webView.load(URLRequest(url: target))
+            loadDocument(target)
         case .hide:
             setMasked(true)
         }
@@ -368,6 +518,7 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         // D2: history traversal never spends a DM token (Back right after a tap in a thread).
         if navigationAction.navigationType == .backForward {
             dmToken = nil
+            pendingTraversal = true
         }
 
         switch verdict(for: url) {
@@ -375,10 +526,13 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
             decisionHandler(.allow)
         case .redirect(let target):
             decisionHandler(.cancel)
+            pendingTraversal = false
             setMasked(true)
-            webView.load(URLRequest(url: target))
+            loadDocument(target)
         case .hide:
             decisionHandler(.cancel)
+            pendingTraversal = false
+            pendingLoad = false
             setMasked(true)
         }
     }
@@ -392,21 +546,32 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         webView.scrollView.refreshControl?.endRefreshing()
+        clearPendingNavigation()
         evaluateCurrentURL()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         webView.scrollView.refreshControl?.endRefreshing()
+        clearPendingNavigation()
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         webView.scrollView.refreshControl?.endRefreshing()
+        clearPendingNavigation()
+    }
+
+    /// A stale flag would mislabel the next pushState (and drop a DM token for nothing).
+    private func clearPendingNavigation() {
+        pendingTraversal = false
+        pendingLoad = false
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         // Fail-closed: mask, then reload; the guard re-evaluates the reloaded document.
         setMasked(true)
         activeReel = nil
+        lastHistory = nil
+        lastRouteURL = nil
         webView.reload()
     }
 
@@ -441,7 +606,7 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
     private func openOutsideOrHere(_ url: URL, userInitiated: Bool) {
         let scheme = url.scheme?.lowercased()
         if site.isDocumentURL(url) || site.isAuxiliaryURL(url) {
-            webView.load(URLRequest(url: url))
+            loadDocument(url)
             return
         }
         guard userInitiated, scheme == "https" || scheme == "http" else { return }

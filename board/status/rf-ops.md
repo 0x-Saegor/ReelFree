@@ -1,48 +1,40 @@
-B05 terminé : revue de sécurité finale sans constat majeur, le 1er TestFlight (C03) n'est pas bloqué. Toutes mes tâches A et B sont faites, je m'arrête.
+D03 et D06 terminés : bin/verify accepte youtube-ads.js avec un profil strict pour le monde .page, la revue D06 ne trouve aucun constat majeur (5 mineurs), docs/SECURITY.md est à jour. Je m'arrête.
 
-## Fait
-- `.github/workflows/ci.yml` :
-  - job ubuntu : `npm ci --ignore-scripts`, Playwright WebKit, `npm test`, `bin/verify --selftest`, `bin/verify` ;
-  - job macos-15 : xcodegen, build-for-testing puis test-without-building sur un simulateur iPhone choisi dynamiquement, sans signature.
-  - Le workflow est aussi appelable (`workflow_call`).
-- `.github/workflows/testflight.yml` :
-  - déclencheurs : dispatch, tags `v*`, cron le 1er de chaque mois ;
-  - rejoue `ci.yml`, archive en signature automatique avec la clé API (`-allowProvisioningUpdates -authenticationKey*`), puis export avec `method=app-store-connect` et `destination=upload` ;
-  - build = `run_number`, version = tag ;
-  - environnement GitHub `testflight` ;
-  - logs filtrés (le dépôt est public, rien n'expose l'identité de signature) et clé effacée en fin de job.
-- `docs/TESTFLIGHT.md` : guide pour l'ami (App ID, fiche ASC, clé API Admin, environnement et secrets GitHub, testeur interne, dépannage, révocation).
-- `bin/verify` réécrit :
-  - JS dans `web/`, Swift et config dans `ios/`, secrets dans tout le dépôt ;
-  - self-test 98/98 ;
-  - état actuel : `OK instagram=… youtube=… swift=6`.
-  - L'ancien `bin/verify` est archivé dans `archive/safari-userscript/verify-userscript`.
-- `docs/SECURITY.md` réécrit pour l'app : modèle de menace T1–T8, règles de `bin/verify`, revue préliminaire § 5. L'ancien est archivé dans `archive/safari-userscript/`.
-- `README.md` réécrit. L'ancien est archivé dans `archive/safari-userscript/README-userscript.md`.
-- Prénom réel retiré de `docs/` et des copies archivées que j'ai créées.
-
-## Points à confirmer au premier vrai run (C02/C03)
-- Flags xcodebuild : la recherche ne les a confirmés que par des posts de forums Apple. Le workflow échoue tôt si `xcodebuild -help` ne connaît pas `-authenticationKeyIssuerID`.
-- La clé API doit avoir le rôle **Admin** (signature dans le cloud).
-- Run CI 41452516056 (commit 9fcf586) : vert. Actions passées à checkout@v5, setup-node@v5 et upload-artifact@v6 (la v5 de upload-artifact tourne encore en Node 20). À confirmer au prochain push.
-- B05 : `bin/verify` suit l'avenant 1. L'allowlist WKAppBoundDomains est exactement : instagram.com, cdninstagram.com, fbcdn.net, youtube.com, ytimg.com, googlevideo.com, google.com, gstatic.com. Self-test 98/98, `bin/verify` OK (swift=10).
-- B05 : revue finale faite par 2 sous-agents sonnet (natif, JS et workflows). Aucun constat MAJEUR. Détails dans `docs/SECURITY.md` § 5 (F1–F10).
-- Corrigé dans mon périmètre :
-  - F9 : `ci.yml` masquait un échec de `build-for-testing` ;
-  - F10 : `testflight.yml` filtre maintenant les logs publics par liste blanche, avec masquage des noms.
+## Fait (D03, D06 — 2026-11-02)
+- `bin/verify` :
+  - `web/youtube-ads.js` est maintenant un script connu, vérifié avec un profil **monde page** (`PAGE=1`) :
+    - les règles JS habituelles, sans exemption pour le bridge ;
+    - aucune URL littérale ;
+    - interdits : `webkit`, `messageHandlers`, `RF_CONFIG`, `onNative`, `sessionStorage`, DOM, événements, minuteries, navigation, globaux (sauf `window.fetch = wrapped`), `defineProperty` hors `(window, name, …)`, prototypes, `origFetch` autrement que par `.apply(this, arguments)`, `new Request` ;
+    - obligatoires : un seul IIFE en strict, la garde d'hôte et la regex `youtube.com`.
+  - Swift :
+    - un seul `WKUserScript` en `.page` est toléré, dans `WebTab.swift` et sous la forme exacte (`source: page`, `.atDocumentStart`, `forMainFrameOnly: true`) ;
+    - `pageScriptResource` doit valoir `nil` pour Instagram et `"youtube-ads"` pour YouTube ;
+    - les handlers et `evaluateJavaScript` restent interdits en `.page`.
+  - Bloqueur (`ios/**/*rules*.json`) : actions `block` ou `css-display-none` seulement, `url-filter` obligatoire, aucune règle `block` sur une URL cœur (documents IG et YT, `/youtubei/v1/player`, `videoplayback`, `ytimg`, CDN IG, `accounts.google.com`, `gstatic`).
+  - `project.yml` ne peut embarquer que les 3 scripts de `web/`.
+  - Self-test : **142/142** (44 nouveaux cas). `bin/verify` : `OK instagram=3cbabb1e0141 youtube=077da5ffed74 youtube-ads=7e5a2ab2eeed swift=16`. `npm test` : 394/394.
+- `ci.yml`, job `unsigned-ipa` : l'étape « Package .ipa » échoue s'il manque à l'`.app` `instagram.js`, `youtube.js`, `youtube-ads.js`, `adblock-rules.json` ou `PrivacyInfo.xcprivacy`, ou si un des scripts embarqués diffère de `web/`. Corrige G6 (`youtube-ads.js` est `optional: true`).
+- `docs/SECURITY.md` :
+  - périmètre élargi ;
+  - nouvelle menace **T9** (monde `.page` et bloqueur) ;
+  - tableau `bin/verify` complété ;
+  - **§ 5 bis** : revue D06 (G1–G6) ;
+  - § 6 : 2 risques acceptés de plus.
+- CI : dernier run poussé (41457499437, commit 0254087) vert sur les 3 jobs, artefact `ReelFree-unsigned-ipa` de 122 Ko. **Le diff local (D01–D07 + ce travail) n'est pas encore passé en CI.**
 
 ## Demandes
-Constats MINEURS de la revue finale B05, notés et non bloquants. Aucun constat MAJEUR.
-- @rf-ios — F1 (`WebTab.swift`, `evaluateCurrentURL`) : une URL nulle ne masque pas la vue. Masquer, sauf pour le `about:blank` initial.
-- @rf-ios — F4 (`Site.swift`), optionnel : les sous-frames Google peuvent charger n'importe quel chemin de google.com. Les limiter à `accounts.google.com`, `consent.google.com` et `www.google.com/recaptcha`.
-- @rf-ios — F5 (`ios/ReelFreeTests`) : ajouter environ 6 XCTests sur `Site.host(isIn:)` (frontière de label, point final, `evilinstagram.com`) et sur `isAuxiliaryURL`, pour figer l'avenant 1.
-- @rf-web — F6 : en mode app (bridge présent), garder `VARIANT_KEY`, `FEED_COUNT_KEY`, `FEED_SEEN_KEY` (instagram.js) et `SHORTS_LOOP_KEY` (youtube.js) en mémoire plutôt qu'en `sessionStorage`, qui est lisible par la page.
-- @orchestrateur — Risques acceptés, à valider :
-  - F2 : jeton DM encore valide pendant la fenêtre KVO avant le message `popstate` ;
-  - F3 : un `a.click()` scripté compte comme `.linkActivated`, et les liens universels peuvent ouvrir l'app Instagram (bloquée par Temps d'écran) ;
-  - F7 : pas de relecteur obligatoire sur l'environnement `testflight`, sinon le cron serait bloqué ;
-  - F8 : actions épinglées par version majeure, pas par SHA.
-- @orchestrateur — Rappels :
-  - les modifications de `ci.yml` et `testflight.yml` (F9, F10) ne seront vérifiées qu'au prochain push ;
-  - C01 : environnement `testflight` et ses 5 secrets ;
-  - prénom réel ou email encore présents dans `CLAUDE.md`, `bin/launch`, `board/TASKS.md`, `board/archive/*` et `archive/safari-userscript/INSTALL-iOS.md` (dépôt public).
+**Constat majeur : aucun.** Rien ne bloque le prochain build.
+- @rf-web — G1 (`youtube-ads.js`, enveloppe `fetch`) : une exception dans le `.then` de succès (`JSON.stringify` ou `new Response`) rejette la promesse au lieu de rendre `res`. Mettre un `try/catch` qui rend `res` et ajouter un test. C'est le plus important des mineurs, car il peut casser le lecteur.
+- @rf-web — G2 : ajouter `data-reelfree-reel`, `-shorts` et `-nav` à `attributeFilter` et remarquer le nœud quand ces attributs sont retirés. Sinon, documenter le risque comme accepté.
+- @rf-web — G3 (`youtube.js`, `skipAd`) : n'agir que si l'interface pub est présente (`.ytp-ad-player-overlay`) ou si la durée est courte, pas sur `.ad-showing` seul.
+- @rf-web — G4, optionnel : ne pas écrire `module.exports` dans le monde page (n'exporter que si `typeof window === 'undefined'`).
+- @rf-web — G5 / F6 toujours ouvert (`sessionStorage` en mode app).
+- @rf-web — D03, vecteurs : `tests/vectors/policy.json` n'a aucun cas `via: "popstate"`. Ajouter au moins « reel avec jeton valide + popstate → pas d'admission », pour que l'XCTest et le JS figent l'avenant 4. Je n'y touche pas, le fichier est à toi.
+- @orchestrateur :
+  - pousser, puis vérifier les 3 jobs de `ci.yml`, surtout la nouvelle vérification du contenu de l'IPA (job « Unsigned IPA (sideload) », étape « Package .ipa ») ;
+  - valider les 2 nouveaux risques acceptés (SECURITY.md § 6 : monde `.page` défaisable par YouTube, bloqueur au mieux) ;
+  - rappels toujours ouverts : C01 (environnement `testflight` et ses secrets), données personnelles encore présentes dans `CLAUDE.md`, `bin/launch`, `board/TASKS.md` (« d'le propriétaire » l. 14), `board/archive/*`, `archive/safari-userscript/INSTALL-iOS.md`.
+
+## Historique
+- A07–A09, B04–B06, C02 : faits (voir `docs/SECURITY.md` § 5, revue B05 F1–F10 ; demandes F1, F4, F5 à rf-ios et F6 à rf-web encore ouvertes).

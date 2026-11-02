@@ -32,6 +32,14 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Barres toujours visibles", isOn: $settings.barsAlwaysVisible)
+                } header: {
+                    Text("Affichage")
+                } footer: {
+                    Text("Sinon, les barres sont masquées : touche la pastille en bas à droite pour les afficher. Glisse depuis le bord gauche pour revenir en arrière.")
+                }
+
+                Section {
                     Text("ReelFree ne contacte aucun serveur. Ta session reste sur cet iPhone, dans l'app.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)

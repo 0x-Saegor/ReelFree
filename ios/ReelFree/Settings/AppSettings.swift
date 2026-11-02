@@ -10,6 +10,7 @@ final class AppSettings: ObservableObject {
         static let feedLimit = "feedLimit"
         static let blockExplore = "blockExplore"
         static let ytHideHomeFeed = "ytHideHomeFeed"
+        static let barsAlwaysVisible = "barsAlwaysVisible"
     }
 
     static let feedLimitRange = 3...50
@@ -46,6 +47,11 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    /// D07: native UI only (not sent to the scripts), so it does not call `onChange`.
+    @Published var barsAlwaysVisible: Bool {
+        didSet { defaults.set(barsAlwaysVisible, forKey: Key.barsAlwaysVisible) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let mode = defaults.string(forKey: Key.feedMode)
@@ -54,6 +60,7 @@ final class AppSettings: ObservableObject {
         feedLimit = min(max(limit, Self.feedLimitRange.lowerBound), Self.feedLimitRange.upperBound)
         blockExplore = (defaults.object(forKey: Key.blockExplore) as? Bool) ?? true
         ytHideHomeFeed = (defaults.object(forKey: Key.ytHideHomeFeed) as? Bool) ?? false
+        barsAlwaysVisible = (defaults.object(forKey: Key.barsAlwaysVisible) as? Bool) ?? false
     }
 
     /// `window.RF_CONFIG` / `{type: "config"}` payload.

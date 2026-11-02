@@ -168,6 +168,14 @@ jobs:
         run: |
           app=$(find "$RUNNER_TEMP/dd/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' | head -1)
           test -n "$app" || { echo "::error::no .app produced"; exit 1; }
+          # D03: the protection scripts, the page-world ad script, the embedded ad rules and the
+          # privacy manifest must ship in the bundle (youtube-ads.js is optional in project.yml).
+          for r in instagram.js youtube.js youtube-ads.js adblock-rules.json PrivacyInfo.xcprivacy; do
+            test -f "$app/$r" || { echo "::error::missing from the .app: $r"; exit 1; }
+          done
+          for r in instagram.js youtube.js youtube-ads.js; do
+            cmp -s "$app/$r" "web/$r" || { echo "::error::bundled $r differs from web/$r"; exit 1; }
+          done
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           cp -R "$app" "$RUNNER_TEMP/ipa/Payload/"
           (cd "$RUNNER_TEMP/ipa" && zip -qry "$GITHUB_WORKSPACE/ReelFree-unsigned.ipa" Payload)

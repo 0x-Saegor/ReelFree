@@ -1,0 +1,16 @@
+[
+  {"trigger": {"url-filter": "^https?://([^/]+\\.)?doubleclick\\.net[/:]"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://([^/]+\\.)?googlesyndication\\.com[/:]"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://([^/]+\\.)?googleadservices\\.com[/:]"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://([^/]+\\.)?google-analytics\\.com[/:]"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://adservice\\.google\\.[a-z]+[/:]"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://adservice\\.google\\.[a-z]+\\.[a-z]+[/:]"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://www\\.google\\.com/pagead/"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://connect\\.facebook\\.net/[^?]*fbevents"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://connect\\.facebook\\.net/signals/"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://([^/]+\\.)?facebook\\.com/tr[/?]"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://([^/]+\\.)?youtube\\.com/pagead/"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://([^/]+\\.)?youtube\\.com/api/stats/ads"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://([^/]+\\.)?youtube\\.com/ptracking"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^https?://([^/]+\\.)?youtube\\.com/get_midroll_"}, "action": {"type": "block"}}
+]

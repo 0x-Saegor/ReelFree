@@ -1,6 +1,30 @@
-Phases A et B, avenants 1 à 3 et F6 (B05) faits ; npm test PASS 366/366 : en attente de nouvelles tâches.
+D01 (perf) et D05 (pubs YouTube) faits, avenants 4 et 5 ajoutés à SPEC-iOS ; npm test PASS 394/394 : en attente de nouvelles tâches.
 
 ## Livré
+- **D01 — Perf JS (iPhone 11).** instagram.js et youtube.js passent en v0.3.0.
+  - **Plus aucun `:has()`** dans le CSS injecté : 5 règles côté Instagram, 20 côté YouTube. Les conteneurs sont marqués par JS (`data-reelfree-reel`, `-ad`, `-nav`, `-shorts`).
+  - **MutationObserver incrémental** : seuls les nœuds ajoutés, les `href` réécrits sur place (recyclage React et Polymer) et les ancêtres d'un nœud retiré sont traités, en un lot par frame (rAF, avec repli par minuterie de 100 ms quand rAF est suspendu). Un scan complet n'a lieu qu'au changement de route ou de réglages. Plus de `querySelectorAll` global dans le chemin chaud.
+  - **Pas de `setInterval` en mode app** : les routes viennent de `onNative({type:'route', path, via})` (avenant 4, ajouté en fin de SPEC-iOS), de `popstate`, des hooks d'historique et de la passe de mutation. Le polling de 250 ms ne reste qu'en mode autonome.
+  - **Mesures** : `node tests/perf/bench.mjs` (WebKit Playwright, profil iPhone 11, fixture réelle `home-feed.html` en mode app, médiane sur 5 à 7 passes). Le scénario fait grossir le fil jusqu'à 604 posts, à raison de 5 posts par frame, puis applique 1000 petites mutations suivies chacune d'un recalcul de style forcé. Hôte Linux desktop : sur l'iPhone 11, les temps sont plusieurs fois plus longs.
+
+    | | avant | après |
+    |---|---|---|
+    | règles `:has()` injectées (IG / YT) | 5 / 20 | 0 / 0 |
+    | `setInterval` en mode app | 1 | 0 |
+    | réveils JS en 3 s de repos | 13 | 1 |
+    | temps de script pendant le scroll (604 posts) | 98 ms | 26 ms |
+    | temps de script, 1000 mutations | 13 ms | 3 ms |
+    | recalcul de style forcé, 1000 mutations | 3 ms | 3 ms (référence sans script : 1 à 2 ms) |
+
+    Le recalcul de style ne bouge pas sur WebKit desktop, dont l'invalidation de `:has()` est efficace sur cette fixture. Le gain mesurable vient du script (re-scan global en O(n) à chaque passe) et des réveils. Le gain lié à `:has()` sur l'iPhone 11 n'est pas mesurable ici.
+  - **Tests de non-régression** : `tests/e2e/perf.spec.mjs` (Instagram) et des blocs « D01 perf » dans `youtube.spec.mjs`. Ils vérifient l'absence de `:has()`, zéro `setInterval` en mode app (avec un témoin en mode autonome), une route décidée sur `onNative` route (avec `via: popstate` ; un message mal formé est ignoré), un post ou un Short ajouté ou réécrit sur place encore masqué, et un démasquage quand le conteneur cesse d'être un Short ou une pub. Les mutations « polling en mode app » et « pas d'observation des `href` » sont bien attrapées.
+  - Un test YouTube existant (avenant 2) émule maintenant le natif : après le `pushState` de la page, il envoie `onNative route`.
+- **D05 — Pubs YouTube.**
+  - `web/youtube-ads.js` v0.1.0, en monde `.page` (avenant 5) : il supprime `adPlacements`, `playerAds` et `adSlots` de `ytInitialPlayerResponse` (via un accesseur posé avant le script inline), des réponses `fetch` de `/youtubei/v1/player` et de la voie XHR (`JSON.parse` sur un objet de type réponse lecteur, à chemins fixes). Il ne fait aucun réseau propre, n'utilise aucun bridge, aucun stockage et n'expose aucun global. No-op hors de `*.youtube.com`.
+  - Repli dans youtube.js (monde isolé) : sur `.ad-showing`, la vidéo est coupée, positionnée à sa fin et « Ignorer » est cliqué ; le son est rétabli après la pub, et un utilisateur qui avait coupé le son le retrouve coupé. Encarts sponsorisés et éléments de fil qui les contiennent masqués. Le tout piloté par événements, sans minuterie.
+  - Tests : `tests/unit/youtube-ads.test.js` (6) et `tests/e2e/youtube-ads.spec.mjs` (14) sur la page synthétique `tests/e2e/pages/yt-watch.html`. Je n'ai pas de capture réelle d'une page de lecture : les noms d'éléments de pub portent un `TODO(recon)`.
+
+## Livré (antérieur)
 - **A03** `tests/vectors/policy.json` : 79 vecteurs générés par `node tests/vectors/generate.cjs` (`--check` vérifie qu'il est à jour). Test Node : `tests/unit/vectors.test.js`.
 - **A01** Les 4 contournements de rf-sec étaient déjà corrigés dans le code. Ajouts : tests de non-régression `tests/e2e/bypass.spec.mjs` (chaque test attrape la mutation qui réintroduit le bug), `tests/unit/media-id.test.js`, et les vecteurs D3 `/p/`. Durcissement : en traversée d'historique (popstate, bfcache), un jeton en attente est consommé sans jamais admettre de média.
 - **A02** `web/instagram.js` v0.2.0 :
@@ -40,6 +64,9 @@ Phases A et B, avenants 1 à 3 et F6 (B05) faits ; npm test PASS 366/366 : en at
 - Le natif doit garder `activeReel` (le reel admis) pour appliquer D3 vers `/p/<autre>`, comme le font les vecteurs.
 
 ## Demandes
+- @rf-ops (D06) — `bin/verify` échoue en mode complet : `unexpected script(s) in web/: youtube-ads.js` et `webview:page-world` (WebTab.swift:205-208). C'est attendu, c'est l'exception de l'avenant 5. Les scripts pris un par un passent : `bin/verify web/instagram.js` et `bin/verify web/youtube.js` donnent FINDINGS 0. Pour youtube-ads.js, les garanties statiques sont déjà testées dans `tests/unit/youtube-ads.test.js`, qui interdit webkit, stockage, cookie, eval, sinks HTML, XHR propre, beacon, WebSocket et setInterval.
+- @rf-ios (D02) — Avenant 4 : appeler `onNative({type:"route", path: url.path, via?})` à chaque changement KVO de `webView.url` (et `via:"popstate"` en back/forward). Sans cet appel, en mode app, un pushState de la page sans mutation DOM n'est vu qu'à la prochaine mutation.
+- @rf-ios — Avenant 5 : `youtube-ads.js` est livré au chemin attendu par `project.yml` (`../web/youtube-ads.js`).
 - @orchestrateur / @rf-ios — **Risque introduit par F6, à arbitrer.** Les deux garde-fous anti-boucle (`/` → `/?variant=following` et `/shorts/<id>` → `/watch?v=<id>`) ne survivent plus à un rechargement complet en mode app. rf-sec les avait passés en sessionStorage pour cette raison.
   - Si Instagram ou YouTube renvoient la cible vers la page d'origine par une redirection serveur, on obtient une boucle de chargements en rafale, avec un risque de limitation du compte.
   - Le natif est le bon endroit pour ce garde-fou, puisque sa mémoire survit aux chargements de document : « même redirection décidée moins de 5 s après la précédente → ne pas recharger, masquer ». Cela vaut d'autant plus que la garde native YouTube applique déjà la redirection Shorts (avenant 3).

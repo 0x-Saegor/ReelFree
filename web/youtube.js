@@ -1,5 +1,6 @@
 /*
- * ReelFree YouTube — Shorts tab and shelves hidden, /shorts/<id> opened as a regular video.
+ * ReelFree YouTube — Shorts tab and shelves hidden, /shorts/<id> opened as a regular video,
+ * sponsored slots hidden and video ads skipped (fallback of web/youtube-ads.js, D05).
  *
  * Injected by the iOS app at document-start, main frame only, in WKContentWorld.defaultClient,
  * after `window.RF_CONFIG = {...}` (docs/SPEC-iOS.md; key used here: ytHideHomeFeed).
@@ -20,7 +21,7 @@
     hideShorts: true       // hide Shorts tab, shelves and entries (redirects of /shorts/<id> always apply)
   };
 
-  var VERSION = '0.2.0';
+  var VERSION = '0.3.0';
   var POLL_MS = 250;
 
   // ---------------------------------------------------------------------------
@@ -133,8 +134,8 @@
 
   // ---------------------------------------------------------------------------
   // CSS. Custom-element tag names and attributes only, never obfuscated classes.
-  // Each :has() selector sits in its own rule: an engine without :has() drops
-  // that rule only, the others survive.
+  // D01 (perf): no :has(). Containers of Shorts are flagged by JS (SHORTS_CONTAINERS) and hidden
+  // through [data-reelfree-shorts].
   // ---------------------------------------------------------------------------
   var root = null;   // set in start(): WebKit may run us before <html> exists
 
@@ -151,6 +152,10 @@
     try { mergeConfig(CONFIG, window.RF_CONFIG); } catch (e) { reportError('config', e); }
   }
   var HIDE = ' { display: none !important; }';
+  var AD_SLOTS = 'ytd-ad-slot-renderer, ytm-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ' +
+    'ytd-promoted-sparkles-web-renderer, ytm-promoted-sparkles-web-renderer, ytd-promoted-video-renderer, ' +
+    'ytm-promoted-video-renderer, ytd-display-ad-renderer, ytd-banner-promo-renderer, ytm-companion-ad-renderer, ' +
+    'ytd-companion-slot-renderer, ytd-action-companion-ad-renderer, ytd-player-legacy-desktop-watch-ads-renderer';
   var S = CONFIG.hideShorts ? 'html[data-rfy-shorts="hide"] ' : null;
   var SHORTS_LINK = 'a[href^="/shorts"], a[href*="youtube.com/shorts/"]';
 
@@ -171,7 +176,11 @@
     'html[data-rfy-mode="home-off"] ytm-browse ytm-feed-filter-chip-bar-renderer' + HIDE,
     'html[data-rfy-loop][data-reelfree="mask"]::after { content: "Short non lisible hors du lecteur Shorts"; }',
     'html[data-rfy-mode="home-off"] body::after { content: "Accueil masqué par ReelFree"; display: block;',
-    '  padding: 40px 16px; text-align: center; font: 600 16px -apple-system, system-ui, sans-serif; color: #888; }'
+    '  padding: 40px 16px; text-align: center; font: 600 16px -apple-system, system-ui, sans-serif; color: #888; }',
+
+    // D05: sponsored slots in feeds, search and the watch page (always on). Item containers that
+    // hold one are flagged by JS (AD_CONTAINERS). TODO(recon): check names on m.youtube.com.
+    AD_SLOTS + ', [data-reelfree-ad], #masthead-ad, #player-ads, .ytp-ad-overlay-container' + HIDE
   ];
 
   if (S) {
@@ -189,29 +198,7 @@
       S + 'ytd-guide-entry-renderer a[title="Shorts"]' + HIDE,
       S + 'ytd-mini-guide-entry-renderer[aria-label="Shorts"]' + HIDE,
       S + 'yt-tab-shape[tab-title="Shorts"]' + HIDE,            // TODO(recon): channel tab on desktop
-      S + '[data-reelfree-shorts]' + HIDE,                      // marked by JS (chips, pivot items)
-
-      // :has() rules, one per rule.
-      S + 'ytd-guide-entry-renderer:has(a[href^="/shorts"])' + HIDE,
-      S + 'ytd-guide-entry-renderer:has(a[title="Shorts"])' + HIDE,
-      S + 'ytd-mini-guide-entry-renderer:has(a[href^="/shorts"])' + HIDE,
-      S + 'ytd-mini-guide-entry-renderer:has(a[title="Shorts"])' + HIDE,
-      S + 'ytm-pivot-bar-item-renderer:has(a[href^="/shorts"])' + HIDE,   // TODO(recon): pivot item may not be an <a>
-      S + 'ytd-rich-section-renderer:has(ytd-rich-shelf-renderer[is-shorts])' + HIDE,
-      S + 'ytd-rich-section-renderer:has(ytd-reel-shelf-renderer)' + HIDE,
-      S + 'ytm-rich-section-renderer:has(ytm-shorts-lockup-view-model)' + HIDE,
-      S + 'ytm-rich-section-renderer:has(ytm-shorts-lockup-view-model-v2)' + HIDE,
-      S + 'ytm-rich-section-renderer:has(ytm-reel-shelf-renderer)' + HIDE,
-      S + 'grid-shelf-view-model:has(ytm-shorts-lockup-view-model)' + HIDE,     // TODO(recon)
-      S + 'grid-shelf-view-model:has(ytm-shorts-lockup-view-model-v2)' + HIDE,  // TODO(recon)
-      S + 'ytd-item-section-renderer:has(> #contents > ytd-reel-shelf-renderer)' + HIDE,
-      S + 'ytd-rich-item-renderer:has(a[href^="/shorts"])' + HIDE,
-      S + 'ytd-video-renderer:has(a[href^="/shorts"])' + HIDE,
-      S + 'ytd-grid-video-renderer:has(a[href^="/shorts"])' + HIDE,
-      S + 'ytd-compact-video-renderer:has(a[href^="/shorts"])' + HIDE,
-      S + 'ytm-rich-item-renderer:has(a[href^="/shorts"])' + HIDE,
-      S + 'ytm-video-with-context-renderer:has(a[href^="/shorts"])' + HIDE,
-      S + 'ytm-compact-video-renderer:has(a[href^="/shorts"])' + HIDE
+      S + '[data-reelfree-shorts]' + HIDE                       // marked by JS (labels, containers)
     );
   }
   var CSS = rules.join('\n');
@@ -298,18 +285,159 @@
   var LABELED = 'yt-chip-cloud-chip-renderer, ytm-chip-cloud-chip-renderer, ytm-pivot-bar-item-renderer, ' +
     'ytd-guide-entry-renderer, ytd-mini-guide-entry-renderer';
 
-  function markShortsUi() {
-    if (!CONFIG.hideShorts) return;
-    var els = document.querySelectorAll(LABELED);
-    for (var i = 0; i < els.length; i++) {
-      var el = els[i];
-      if (el.hasAttribute('data-reelfree-shorts')) continue;
-      if ((el.textContent || '').trim() === 'Shorts') el.setAttribute('data-reelfree-shorts', '');
+  // Containers hidden when they hold a Short (these replaced :has() rules). [container, inner].
+  // TODO(recon): pivot item may not be an <a>; grid-shelf-view-model unverified.
+  var SHORTS_CONTAINERS = [
+    ['ytd-guide-entry-renderer, ytd-mini-guide-entry-renderer', 'a[href^="/shorts"], a[title="Shorts"]'],
+    ['ytm-pivot-bar-item-renderer', 'a[href^="/shorts"]'],
+    ['ytd-rich-section-renderer', 'ytd-rich-shelf-renderer[is-shorts], ytd-reel-shelf-renderer'],
+    ['ytm-rich-section-renderer', 'ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2, ytm-reel-shelf-renderer'],
+    ['grid-shelf-view-model', 'ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2'],
+    ['ytd-item-section-renderer', ':scope > #contents > ytd-reel-shelf-renderer'],
+    ['ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, ' +
+      'ytm-rich-item-renderer, ytm-video-with-context-renderer, ytm-compact-video-renderer', 'a[href^="/shorts"]']
+  ];
+
+  // A labeled element ("Shorts" chip or tab) stays flagged; a container follows its content, since
+  // YouTube recycles renderers and rewrites their links in place.
+  function scanContainer(el, inner, flag) {
+    if (el.hasAttribute('data-reelfree-label')) return;
+    var on = !!el.querySelector(inner);
+    if (on) { if (!el.hasAttribute(flag)) el.setAttribute(flag, ''); }
+    else if (el.hasAttribute(flag)) el.removeAttribute(flag);
+  }
+
+  // D05: single feed items that wrap a sponsored slot (never a whole section: search results
+  // share their section with an ad).
+  var AD_CONTAINERS = [['ytd-rich-item-renderer, ytm-rich-item-renderer', AD_SLOTS]];
+
+  function scanContainers(n, table, flag) {
+    for (var k = 0; k < table.length; k++) {
+      var c = table[k];
+      var up = n.closest(c[0]);
+      if (up) scanContainer(up, c[1], flag);
+      var list = n.querySelectorAll(c[0]);
+      for (var j = 0; j < list.length; j++) scanContainer(list[j], c[1], flag);
     }
   }
 
   // ---------------------------------------------------------------------------
-  // Router: popstate + YouTube SPA events + polling fallback.
+  // D05 fallback for video ads that youtube-ads.js (page world) could not prune: while the player
+  // shows an ad (.ad-showing), mute it, seek to its end and press "Skip" when present. The muted
+  // state is restored when the ad ends. Event driven: one class observer per player, no timer.
+  // ---------------------------------------------------------------------------
+  var PLAYER_SEL = '.html5-video-player, #movie_player';
+  var SKIP_SEL = '.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, ' +
+    '.ytp-ad-skip-button-slot button, .ytp-ad-skip-button-container button';
+  var weakOk = typeof WeakSet === 'function' && typeof WeakMap === 'function';
+  var watchedPlayers = weakOk ? new WeakSet() : null;
+  var watchedVideos = weakOk ? new WeakSet() : null;
+  var mutedBefore = weakOk ? new WeakMap() : null;
+
+  function playerOf(v) {
+    return v && v.closest ? v.closest(PLAYER_SEL) : null;
+  }
+
+  function skipAd(player, v) {
+    try { v.muted = true; } catch (e) { /* ignore */ }
+    var d = v.duration;
+    if (typeof d === 'number' && isFinite(d) && d > 0 && v.currentTime < d) {
+      try { v.currentTime = d; } catch (e) { /* not seekable yet */ }
+    }
+    var btn = player.querySelector(SKIP_SEL);
+    if (btn) { try { btn.click(); } catch (e) { /* ignore */ } }
+  }
+
+  function onAdMedia(ev) {
+    var v = ev.target;
+    var p = playerOf(v);
+    if (p && p.classList.contains('ad-showing')) skipAd(p, v);
+  }
+
+  function checkAd(player) {
+    var v = player.querySelector('video');
+    if (!v) return;
+    if (player.classList.contains('ad-showing')) {
+      if (!mutedBefore.has(v)) mutedBefore.set(v, !!v.muted);
+      if (!watchedVideos.has(v)) {
+        watchedVideos.add(v);
+        v.addEventListener('loadedmetadata', onAdMedia, true);
+        v.addEventListener('durationchange', onAdMedia, true);
+        v.addEventListener('playing', onAdMedia, true);
+      }
+      skipAd(player, v);
+    } else if (mutedBefore.has(v)) {
+      try { v.muted = mutedBefore.get(v); } catch (e) { /* ignore */ }
+      mutedBefore['delete'](v);
+    }
+  }
+
+  function watchPlayer(p) {
+    if (!weakOk) return;
+    if (watchedPlayers.has(p)) {
+      if (p.classList.contains('ad-showing')) checkAd(p);   // e.g. its <video> was just inserted
+      return;
+    }
+    watchedPlayers.add(p);
+    new MutationObserver(function () {
+      try { checkAd(p); } catch (e) { reportError('ads', e); }
+    }).observe(p, { attributes: true, attributeFilter: ['class'] });
+    checkAd(p);
+  }
+
+  function scanPlayers(n) {
+    var up = n.closest(PLAYER_SEL);
+    if (up) watchPlayer(up);
+    var list = n.querySelectorAll(PLAYER_SEL);
+    for (var j = 0; j < list.length; j++) watchPlayer(list[j]);
+  }
+
+  function scanLabel(el) {
+    if (el.hasAttribute('data-reelfree-shorts')) return;
+    if ((el.textContent || '').trim() === 'Shorts') {
+      el.setAttribute('data-reelfree-label', '');
+      el.setAttribute('data-reelfree-shorts', '');
+    }
+  }
+
+  // Flags Shorts UI, sponsored items and video players in the given subtrees only (added nodes,
+  // changed links: D01), never the whole document in the mutation path. markUi([root]) is the
+  // full pass, on route or config change only.
+  // Removed content: the containers above a changed parent may no longer hold a Short or an ad.
+  function markUp(ups) {
+    for (var i = 0; i < ups.length; i++) {
+      var n = ups[i];
+      if (!n.isConnected) continue;
+      upContainers(n, AD_CONTAINERS, 'data-reelfree-ad');
+      if (CONFIG.hideShorts) upContainers(n, SHORTS_CONTAINERS, 'data-reelfree-shorts');
+    }
+  }
+
+  function upContainers(n, table, flag) {
+    for (var k = 0; k < table.length; k++) {
+      var up = n.closest(table[k][0]);
+      if (up) scanContainer(up, table[k][1], flag);
+    }
+  }
+
+  function markUi(nodes) {
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      if (!n || n.nodeType !== 1 || !n.isConnected) continue;
+      scanContainers(n, AD_CONTAINERS, 'data-reelfree-ad');
+      scanPlayers(n);
+      if (!CONFIG.hideShorts) continue;
+      scanContainers(n, SHORTS_CONTAINERS, 'data-reelfree-shorts');
+      var lab = n.closest(LABELED);
+      if (lab) scanLabel(lab);
+      var labs = n.querySelectorAll(LABELED);
+      for (var m = 0; m < labs.length; m++) scanLabel(labs[m]);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Router: popstate + YouTube SPA events + mutation pass; polling only outside the app
+  // (in the app, routes come from onNative {type: "route"}, Avenant 4).
   // ---------------------------------------------------------------------------
   function evaluate() {
     var d;
@@ -324,7 +452,7 @@
     if (d.action === 'allow') {
       try {
         applyAttrs();
-        markShortsUi();
+        markUi([root]);
       } catch (e) {
         setMask(true);
         return;
@@ -354,8 +482,16 @@
   // Native -> JS: window.reelfree.onNative(msg). Only {type: "config"} matters here; DM messages
   // are Instagram-only and ignored, like anything unknown or malformed.
   function onNative(msg) {
-    if (!msg || typeof msg !== 'object' || msg.type !== 'config') return;
+    if (!msg || typeof msg !== 'object') return;
     try {
+      if (msg.type === 'route') {
+        // Avenant 4: pushed on every URL change; the path is a hint, window.location decides.
+        if (typeof msg.path !== 'string') return;
+        if (msg.via === 'popstate') onPopstate();
+        else checkRoute();
+        return;
+      }
+      if (msg.type !== 'config') return;
       if (!mergeConfig(CONFIG, msg.config).length) return;
       lastPath = null;   // re-decide the current route with the new settings
       checkRoute();
@@ -381,28 +517,61 @@
     if (d.action === 'redirect' && isSameOriginPath(d.to)) window.location.assign(d.to);
   }
 
-  function onMutations() {
+  function onPopstate() {
+    viaPopstate = true;
+    try { checkRoute(); } finally { viaPopstate = false; }
+  }
+
+  function onMutations(nodes, ups) {
     applyAttrs();   // the page may have rewritten <html> attributes
     if (!styleEl.isConnected) styleEl = injectStyle('reelfree-yt-style', CSS);
+    var before = lastPath;
     checkRoute();
     if (masked) { pauseMedia(); return; }
+    if (lastPath !== before) return;   // the new route already ran a full pass
     try {
-      markShortsUi();
+      markUi(nodes);
+      markUp(ups);
     } catch (e) {
       setMask(true);
     }
   }
 
-  // Single throttled MutationObserver.
-  var MO_THROTTLE_MS = 150;
+  // Single MutationObserver, batched once per frame (D01): added nodes and changed attributes are
+  // queued and scanned in requestAnimationFrame (before the next paint), with a one-shot timer
+  // fallback because rAF is suspended while a navigation is pending or the WebView is hidden.
+  var MO_MAX_QUEUE = 2000;
+  var MO_FALLBACK_MS = 100;
+  var moQueue = [];
+  var moUp = [];   // parents of removed nodes: only their containers (ancestors) are re-checked
+  var moFull = false;
   var moScheduled = false;
-  var observer = new MutationObserver(function () {
+  var moTimer = 0;
+  function flushMutations() {
+    if (!moScheduled) return;
+    moScheduled = false;
+    window.clearTimeout(moTimer);
+    var nodes = moFull ? [root] : moQueue;
+    var ups = moFull ? [] : moUp;
+    moQueue = [];
+    moUp = [];
+    moFull = false;
+    onMutations(nodes, ups);
+  }
+  var observer = new MutationObserver(function (records) {
+    for (var i = 0; i < records.length && !moFull; i++) {
+      var r = records[i];
+      if (r.type === 'attributes') moQueue.push(r.target);
+      else {
+        for (var j = 0; j < r.addedNodes.length; j++) if (r.addedNodes[j].nodeType === 1) moQueue.push(r.addedNodes[j]);
+        if (r.removedNodes.length && r.target.nodeType === 1) moUp.push(r.target);
+      }
+      if (moQueue.length + moUp.length > MO_MAX_QUEUE) { moFull = true; moQueue = []; moUp = []; }
+    }
     if (moScheduled) return;
     moScheduled = true;
-    window.setTimeout(function () {
-      moScheduled = false;
-      onMutations();
-    }, MO_THROTTLE_MS);
+    if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(flushMutations);
+    moTimer = window.setTimeout(flushMutations, MO_FALLBACK_MS);
   });
 
   // --- Boot ------------------------------------------------------------------
@@ -418,16 +587,14 @@
     applyAttrs();   // masked = true at this point
     styleEl = injectStyle('reelfree-yt-style', CSS);
     checkRoute();
-    window.addEventListener('popstate', function () {
-      viaPopstate = true;
-      try { checkRoute(); } finally { viaPopstate = false; }
-    }, true);
+    window.addEventListener('popstate', onPopstate, true);
     window.addEventListener('click', onClick, true);
     // YouTube SPA navigation events (desktop); harmless if never fired.
     document.addEventListener('yt-navigate-start', checkRoute, true);
     document.addEventListener('yt-navigate-finish', checkRoute, true);
-    window.setInterval(checkRoute, POLL_MS);
-    observer.observe(root, { childList: true, subtree: true });
+    if (!BRIDGE) window.setInterval(checkRoute, POLL_MS);
+    // href / is-shorts / title: YouTube recycles renderers and rewrites them in place.
+    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'is-shorts', 'title'] });
     new MutationObserver(applyAttrs).observe(root, {
       attributes: true, attributeFilter: ['data-reelfree', 'data-rfy-mode', 'data-rfy-shorts']
     });

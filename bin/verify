@@ -7,7 +7,7 @@
 #   bin/verify               # everything: web/*.js, ios/, secrets
 #   bin/verify --js          # web/*.js only
 #   bin/verify --swift       # ios/ only (+ secrets)
-#   bin/verify FILE.js       # one injected script (named instagram.js or youtube.js)
+#   bin/verify FILE.js       # one injected script (instagram.js, youtube.js, or youtube-ads.js = page world)
 #   bin/verify --selftest    # every rule must catch a known-bad sample, clean samples must pass
 #
 # Last line is exactly one of:
@@ -83,9 +83,48 @@ my @rules = (
   [ "store:ss-bulk",      qr/sessionStorage\s*(?:\[|\.\s*(?:clear|key|length)\b)/ ],
   [ "read:clipboard",     qr/clipboard|execCommand/ ],
 );
+# Page-world profile (docs/SPEC-iOS.md, avenant 5; docs/SECURITY.md T9): youtube-ads.js runs in
+# WKContentWorld.page, next to Instagram/YouTube code. Stricter: no bridge at all, no storage,
+# no DOM, no events, no timers, no navigation, no global except the fetch wrapper, and the only
+# call to the page's network function is a pass-through of the page's own arguments.
+my $PAGE = $ENV{PAGE} ? 1 : 0;
+my @page_rules = (
+  [ "page:bridge",        qr/\bwebkit\b|messageHandlers|\bRF_CONFIG\b|\bonNative\b|\breelfree\s*[.\[]/ ],
+  [ "page:storage",       qr/sessionStorage|\bStorage\b/ ],
+  [ "page:dom",           qr/\bdocument\s*\.|MutationObserver|querySelector|getElement|\.\s*click\s*\(/ ],
+  [ "page:events",        qr/addEventListener|dispatchEvent|CustomEvent|MessageChannel|BroadcastChannel|\bonmessage\b/ ],
+  [ "page:timer",         qr/\bset(?:Timeout|Interval|Immediate)\b|requestAnimationFrame|requestIdleCallback/ ],
+  [ "page:navigation",    qr/\blocation\s*\.\s*(?:href|hash|search|pathname)\s*=(?!=)|\blocation\s*\.\s*(?:assign|replace|reload)\s*\(|\blocation\s*=(?!=)|\bhistory\s*\./ ],
+  [ "page:global",        qr/\bglobalThis\b|\b(?:window|self)\s*\.\s*(?!fetch\b)[A-Za-z_\$][\w\$]*\s*=(?!=)/ ],
+  [ "page:define",        qr/defineProperty\s*\(\s*(?!window\s*,\s*name\s*,)|defineProperties|__proto__|setPrototypeOf|\.\s*prototype\s*\.\s*\w+\s*=(?!=)/ ],
+  [ "page:fetch-call",    qr/origFetch\s*(?:\(|\.\s*(?:call|bind)\b|\.\s*apply\s*\((?!\s*this\s*,\s*arguments\s*\)))/ ],
+  [ "page:request",       qr/\bnew\s+(?:window\s*\.\s*)?Request\b/ ],
+);
+my $src = join("", @lines);
+if ($PAGE) {
+  hit(0, "page:host-guard", "missing 'if (!hostAllowed(window.location.hostname)) return;'")
+    unless $src =~ /if\s*\(\s*!\s*hostAllowed\s*\(\s*window\s*\.\s*location\s*\.\s*hostname\s*\)\s*\)\s*return\s*;/;
+  hit(0, "page:host-regex", "hostAllowed must test /(^|\\.)youtube\\.com\$/")
+    unless $src =~ m{/\(\^\|\\\.\)youtube\\\.com\$/};
+  hit(0, "page:iife", "script must be one IIFE: (function () { ... })();")
+    unless $src =~ /\A(?:\s*\/\*.*?\*\/)?\s*\(function\s*\(\)\s*\{\s*[\x27"]use strict[\x27"];.*\}\)\(\);\s*\z/s;
+}
 for my $i (0 .. $#lines) {
   my $l = $lines[$i]; my $n = $i + 1;
-  (my $c = $l) =~ s/$BRIDGE//g;
+  (my $c = $l) =~ s/$BRIDGE//g unless $PAGE;   # page world: no bridge call is legitimate
+  $c = $l if $PAGE;
+  if ($PAGE) {
+    # The two allowed touches of the page's fetch: keep a reference, install the wrapper.
+    $c =~ s/^\s*var\s+origFetch\s*=\s*window\s*\.\s*fetch\s*;\s*$//;
+    $c =~ s/\bwindow\s*\.\s*fetch\s*=\s*wrapped\s*;//;
+    # Whole-line comments may name fetch (never call it).
+    $c =~ s/\bfetch\b(?!\s*\()/fetch_word/g if $c =~ /^\s*(?:\*|\/\/|\/\*)/;
+    $c =~ s/\bfetch_word\b/F/g;
+    # Whole-line comments may say "never touches window.webkit"; code may not name it at all
+    # (a fake comment line holding a bridge call is still caught by net:postmessage).
+    my $code = $c =~ /^\s*(?:\*|\/\/|\/\*)/ ? "" : $c;
+    for my $r (@page_rules) { hit($n, $r->[0], $l) if ($r->[0] eq "page:bridge" ? $code : $c) =~ $r->[1]; }
+  }
   for my $r (@rules) { hit($n, $r->[0], $l) if $c =~ $r->[1]; }
 
   # sessionStorage keys must be string literals starting with "reelfree:" (or an
@@ -126,12 +165,14 @@ PERL
 
 # verify_js FILE -> prints details, returns 0/1/2. Last line OK sha256=.. or FAIL.
 verify_js() {
-  local f=$1 hosts sha
+  local f=$1 hosts sha page=
   [ -f "$f" ] && [ -r "$f" ] || { printf 'FAIL file not readable: %s\n' "$f"; return 2; }
   case $(basename "$f") in
     instagram.js) hosts='www.instagram.com' ;;
     youtube.js)   hosts='m.youtube.com www.youtube.com' ;;
-    *) printf 'FAIL unknown script name: %s (expected instagram.js or youtube.js)\n' "$(basename "$f")"; return 2 ;;
+    # Page world (avenant 5): no URL literal at all, stricter rules (PAGE=1).
+    youtube-ads.js) hosts='' page=1 ;;
+    *) printf 'FAIL unknown script name: %s (expected instagram.js, youtube.js or youtube-ads.js)\n' "$(basename "$f")"; return 2 ;;
   esac
   sha=$(sha256sum -- "$f" | cut -d' ' -f1) || { printf 'FAIL sha256sum failed\n'; return 2; }
   # A script that does not parse never runs: nothing is hidden (fail-open). Blocking.
@@ -144,7 +185,7 @@ verify_js() {
     printf 'WARN node not found: syntax check skipped\n'
   fi
   printf 'sha256 %s\n' "$sha"
-  HOSTS="$hosts" perl -CSD -e "$JS_SCAN" "$f"
+  HOSTS="$hosts" PAGE="$page" perl -CSD -e "$JS_SCAN" "$f"
   case $? in
     0) printf 'OK sha256=%s\n' "${sha:0:12}"; return 0 ;;
     1) printf 'FAIL forbidden API in %s (see findings above)\n' "$(basename "$f")"; return 1 ;;
@@ -200,14 +241,40 @@ my @rules = (
   [ "data:keychain",       qr/\bSecItem(?:Add|Update|CopyMatching)\b/ ],
   [ "code:dynamic",        qr/\bdlopen\b|\bdlsym\b|NSClassFromString|NSSelectorFromString/ ],
 );
-my %src_text; my $bound_on = 0;
+my %src_text; my $bound_on = 0; my $page_scripts = 0; my $page_resource_seen = 0;
+# Avenant 5 (docs/SECURITY.md T9): exactly one page-world script is allowed, in WebTab.swift,
+# spelled exactly as below (source = the bundled pageScriptResource, document start, main frame).
+my $PAGE_SCRIPT = qr/WKUserScript\s*\(\s*source\s*:\s*page\s*,\s*injectionTime\s*:\s*\.atDocumentStart\s*,\s*forMainFrameOnly\s*:\s*true\s*,\s*in\s*:\s*\.page\s*\)/;
 for my $f (@swift) {
   my $s = slurp($f); defined $s or do { hit($f, 0, "io:unreadable"); next };
   my @L = split /\n/, $s, -1;
   $bound_on = 1 if $s =~ /limitsNavigationsToAppBoundDomains\s*=\s*true/;
+  # Pre-pass: lines covered by the one allowed page-world WKUserScript.
+  my %page_ok;
+  for my $i (0 .. $#L) {
+    next unless $L[$i] =~ /\bWKUserScript\s*\(/;
+    my $w = join(" ", @L[$i .. ($i + 4 > $#L ? $#L : $i + 4)]);
+    next unless $w =~ /\bin\s*:\s*(?:WKContentWorld)?\s*\.page\b/;
+    if ($f =~ m{/WebTab\.swift$} && $w =~ $PAGE_SCRIPT && ++$page_scripts == 1) {
+      for my $j ($i .. ($i + 4 > $#L ? $#L : $i + 4)) { $page_ok{$j} = 1; last if $L[$j] =~ /\.page\b/; }
+    }
+  }
+  # The page script resource: nil for Instagram, "youtube-ads" for YouTube, nothing else.
+  if ($s =~ /var\s+pageScriptResource\s*:\s*String\?\s*\{(.*?)\n    \}/s) {
+    my $b = $1; $page_resource_seen++;
+    hit($f, 0, "webview:page-resource", "Instagram must have no page-world script")
+      unless $b =~ /case\s*\.instagram\s*:\s*return\s+nil\b/;
+    while ($b =~ /return\s+([^\n]+)/g) {
+      my $v = $1; $v =~ s/\s+$//;
+      hit($f, 0, "webview:page-resource", "pageScriptResource returns $v") unless $v eq 'nil' || $v eq '"youtube-ads"';
+    }
+  }
   for my $i (0 .. $#L) {
     my $l = $L[$i]; my $n = $i + 1;
-    for my $r (@rules) { hit($f, $n, $r->[0], $l) if $l =~ $r->[1]; }
+    for my $r (@rules) {
+      next if $page_ok{$i} && $r->[0] eq "webview:page-world";
+      hit($f, $n, $r->[0], $l) if $l =~ $r->[1];
+    }
     if ($l =~ /^\s*(?:\@\w+\s+)*import\s+(?:(?:struct|class|enum|protocol|func|var|let|typealias)\s+)?(\w+)/) {
       my $m = $1; hit($f, $n, "dep:import", $l) unless $import_ok{$m} || $m =~ /^ReelFree\w*$/;
     }
@@ -219,7 +286,8 @@ for my $f (@swift) {
       hit($f, $n, "webview:js-world", "JS must run in .defaultClient: $l") unless $w =~ /\bin\s*:\s*(?:WKContentWorld)?\s*\.defaultClient\b/;
     }
     if ($l =~ /\bWKUserScript\s*\(/) {
-      hit($f, $n, "webview:script-world", "WKUserScript needs in: .defaultClient: $l") unless $w =~ /\bin\s*:\s*(?:WKContentWorld)?\s*\.defaultClient\b/;
+      hit($f, $n, "webview:script-world", "WKUserScript needs in: .defaultClient: $l")
+        unless $w =~ /\bin\s*:\s*(?:WKContentWorld)?\s*\.defaultClient\b/ || $page_ok{$i};
       hit($f, $n, "webview:script-frames", "WKUserScript needs forMainFrameOnly: true: $l") unless $w =~ /forMainFrameOnly\s*:\s*true/;
     }
     if ($l =~ /\b(?:add|addScriptMessageHandler)\s*\(/ && $w =~ /\bname\s*:/) {
@@ -228,7 +296,34 @@ for my $f (@swift) {
     }
   }
 }
+hit($ios, 0, "webview:page-resource", "a page-world script is installed but pageScriptResource was not found")
+  if $page_scripts && !$page_resource_seen;
 hit($ios, 0, "swift:none", "no Swift source in ios/") unless @swift;
+
+# --- Content blocker rules (D04): embedded JSON, block / css-display-none only, never the core ---
+# A rule that matches one of these URLs would break login or playback (D04 contract).
+my @core_urls = qw(
+  https://www.instagram.com/ https://www.instagram.com/direct/inbox/ https://scontent.cdninstagram.com/v/x.jpg
+  https://www.youtube.com/ https://m.youtube.com/watch?v=abc https://www.youtube.com/youtubei/v1/player
+  https://i.ytimg.com/vi/abc/hqdefault.jpg https://rr1---sn-abc.googlevideo.com/videoplayback?id=1
+  https://accounts.google.com/ServiceLogin https://www.gstatic.com/x.js https://static.xx.fbcdn.net/x.js
+);
+my @rule_files;
+find({ no_chdir => 1, wanted => sub { push @rule_files, $File::Find::name if -f $_ && /(?:^|\/)[^\/]*rules[^\/]*\.json$/ } }, $ios);
+for my $f (@rule_files) {
+  my $s = slurp($f); my $rules = eval { require JSON::PP; JSON::PP->new->decode($s // "") };
+  if (ref $rules ne "ARRAY" || !@$rules) { hit($f, 0, "adblock:format", "not a non-empty JSON array"); next; }
+  for my $k (0 .. $#$rules) {
+    my $r = $rules->[$k]; my $type = ref $r eq "HASH" && ref $r->{action} eq "HASH" ? ($r->{action}{type} // "") : "";
+    my $flt = ref $r eq "HASH" && ref $r->{trigger} eq "HASH" ? $r->{trigger}{"url-filter"} : undef;
+    hit($f, $k + 1, "adblock:action", "rule #" . ($k + 1) . ": action '$type' (only block, css-display-none)")
+      unless $type eq "block" || $type eq "css-display-none";
+    if (!defined $flt || $flt eq "") { hit($f, $k + 1, "adblock:filter", "rule #" . ($k + 1) . ": no url-filter"); next; }
+    next if $type ne "block";
+    my $re = eval { qr/$flt/ }; next unless $re;   # WebKit compiles it; XCTest checks compilation
+    for my $u (@core_urls) { hit($f, $k + 1, "adblock:breaks-core", "rule #" . ($k + 1) . " blocks $u") if $u =~ $re; }
+  }
+}
 hit($ios, 0, "webview:app-bound-missing", "no 'limitsNavigationsToAppBoundDomains = true' in ios/") if @swift && !$bound_on;
 
 # --- Info.plist / entitlements / project.yml --------------------------------
@@ -254,6 +349,9 @@ for my $f (@yml) {
     hit($f, $n, "dep:spm-package", $l)      if $l =~ /^\s*packages\s*:/;
     hit($f, $n, "dep:external", $l)         if $l =~ /^\s*-?\s*(?:package|framework|carthage|bundle)\s*:/;
     hit($f, $n, "build:download", $l)       if $l =~ /\b(?:curl|wget|git\s+clone|pip\s+install|npm\s+install|brew\s+install)\b/;
+    # Only the three checked scripts of web/ may be bundled (and so injected).
+    hit($f, $n, "build:web-resource", $l)
+      if $l =~ m{\bweb/([^\s#\x27"]+)} && $1 !~ /^(?:instagram|youtube|youtube-ads)\.js$/;
     if ($l =~ /^(\s*)WKAppBoundDomains\s*:\s*(.*?)\s*$/) {
       my ($ind, $inline) = (length $1, $2); $domains_src++; my $before = @domains;
       if ($inline =~ /^\[(.*)\]$/) { push @domains, map { my $d = $_; $d =~ s/^\s*[\x27"]?|[\x27"]?\s*$//g; [$f, $d] } split /,/, $1; }
@@ -401,6 +499,66 @@ selftest() {
   jcheck long-line        "$(printf 'x%.0s' $(seq 1 600))"
   rm -f "$tmp/instagram.js"
 
+  # ---- JS, page world (youtube-ads.js, avenant 5) ----
+  local pclean
+  pclean=$(cat <<'JS'
+/* comment naming fetch, as the real file does */
+(function () {
+  'use strict';
+  function hostAllowed(h) { return /(^|\.)youtube\.com$/.test(h); }
+  if (!hostAllowed(window.location.hostname)) return;
+  var origFetch = window.fetch;
+  var wrapped = function (input, init) { return origFetch.apply(this, arguments); };
+  try { window.fetch = wrapped; } catch (e) { /* ignore */ }
+  var origParse = JSON.parse;
+  JSON.parse = function () { return origParse.apply(this, arguments); };
+  // INJECT
+})();
+JS
+)
+  printf '%s\n' "$pclean" > "$tmp/youtube-ads.js"
+  verify_js "$tmp/youtube-ads.js" >/dev/null || { verify_js "$tmp/youtube-ads.js"; fail "selftest: clean page-world sample rejected"; }
+  # pcheck LABEL JS-LINE : put one line inside the clean page-world IIFE, expect FAIL.
+  pcheck() {
+    n=$((n+1)); printf '%s\n' "${pclean/\/\/ INJECT/$2}" > "$tmp/youtube-ads.js"
+    if verify_js "$tmp/youtube-ads.js" >/dev/null 2>&1; then printf '  MISSED  page:%s\n' "$1"; bad=$((bad+1))
+    else printf '  caught  page:%s\n' "$1"; fi
+  }
+  pcheck bridge-call      'window.webkit.messageHandlers.reelfree.postMessage({})'
+  pcheck bridge-probe     'var w = window.webkit;'
+  pcheck rf-config        'var c = window.RF_CONFIG;'
+  pcheck on-native        'var o = window.reelfree.onNative;'
+  pcheck session-storage  'sessionStorage.getItem("reelfree:x");'
+  pcheck dom-read         'var t = document.body;'
+  pcheck dom-query        'var q = el.querySelector("a");'
+  pcheck click            'btn.click();'
+  pcheck event            'window.addEventListener("message", f);'
+  pcheck custom-event     'var e = new CustomEvent("x");'
+  pcheck timer            'setTimeout(f, 10);'
+  pcheck raf              'requestAnimationFrame(f);'
+  pcheck navigate         'window.location.href = "/x";'
+  pcheck history          'history.pushState(null, "", "/x");'
+  pcheck global-expose    'window.rfAds = wrapped;'
+  pcheck globalthis       'globalThis.x = 1;'
+  pcheck define-other     'Object.defineProperty(Object.prototype, "x", {});'
+  pcheck proto-assign     'Array.prototype.x = 1;'
+  pcheck fetch-direct     'fetch("/youtubei/v1/log");'
+  pcheck fetch-own-args   'origFetch("/youtubei/v1/log");'
+  pcheck fetch-apply-own  'origFetch.apply(this, ["/x"]);'
+  pcheck fetch-call       'origFetch.call(window, "/x");'
+  pcheck new-request      'var r = new Request("/x");'
+  pcheck any-url          'var u = "https://www.youtube.com/x";'
+  pcheck xhr              'var x = new XMLHttpRequest();'
+  pcheck eval             'eval("1");'
+  pcheck html-sink        'el.innerHTML = s;'
+  n=$((n+1)); printf '%s\n' "${pclean/if (!hostAllowed(window.location.hostname)) return;/}" > "$tmp/youtube-ads.js"
+  if verify_js "$tmp/youtube-ads.js" >/dev/null 2>&1; then printf '  MISSED  page:no-host-guard\n'; bad=$((bad+1)); else printf '  caught  page:no-host-guard\n'; fi
+  n=$((n+1)); printf '%s\n' "${pclean//youtube\\.com\$/tube\\.com\$}" > "$tmp/youtube-ads.js"
+  if verify_js "$tmp/youtube-ads.js" >/dev/null 2>&1; then printf '  MISSED  page:host-regex\n'; bad=$((bad+1)); else printf '  caught  page:host-regex\n'; fi
+  n=$((n+1)); printf '%s\nvar leaked = 1;\n' "$pclean" > "$tmp/youtube-ads.js"
+  if verify_js "$tmp/youtube-ads.js" >/dev/null 2>&1; then printf '  MISSED  page:not-iife\n'; bad=$((bad+1)); else printf '  caught  page:not-iife\n'; fi
+  rm -f "$tmp/youtube-ads.js"
+
   # ---- Swift / project ----
   local T="$tmp/root"
   mk_clean() {
@@ -455,6 +613,31 @@ func makeWebView(handler: WKScriptMessageHandler) -> WKWebView {
     return wv
 }
 SW
+    # Avenant 5: the one allowed page-world script and its resource mapping.
+    cat > "$T/ios/ReelFree/WebTab.swift" <<'SW'
+import WebKit
+
+func installPage(_ ucc: WKUserContentController, page: String) {
+    ucc.addUserScript(WKUserScript(source: page,
+                                   injectionTime: .atDocumentStart,
+                                   forMainFrameOnly: true,
+                                   in: .page))
+}
+SW
+    cat > "$T/ios/ReelFree/Site.swift" <<'SW'
+enum Site: String {
+    case instagram, youtube
+
+    var pageScriptResource: String? {
+        switch self {
+        case .instagram: return nil
+        case .youtube: return "youtube-ads"
+        }
+    }
+}
+SW
+    printf '%s\n' '[{"trigger": {"url-filter": "^https?://([^/]+\\.)?doubleclick\\.net[/:]"}, "action": {"type": "block"}}]' \
+      > "$T/ios/ReelFree/adblock-rules.json"
   }
   run_swift() { RF_VERIFY_ROOT="$T" "$SELF" --swift >/dev/null 2>&1; }
   mk_clean
@@ -490,6 +673,21 @@ SW
   sw keychain           'SecItemAdd(q, nil)'
   sw dlopen             'let h = dlopen("x", 0)'
   sw bidi               "let s = \"a‮b\""
+  # Avenant 5: page world allowed once, in WebTab.swift, in the exact form only.
+  scheck page-second-script "sed -i 's/^}\$/    ucc.addUserScript(WKUserScript(source: page, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page))\n}/' ios/ReelFree/WebTab.swift"
+  scheck page-all-frames    "sed -i 's/forMainFrameOnly: true,/forMainFrameOnly: false,/' ios/ReelFree/WebTab.swift"
+  scheck page-other-source  "sed -i 's/source: page,/source: other,/' ios/ReelFree/WebTab.swift"
+  scheck page-doc-end       "sed -i 's/atDocumentStart/atDocumentEnd/' ios/ReelFree/WebTab.swift"
+  scheck page-handler       "printf '%s\n' 'import WebKit' 'func f(u: WKUserContentController, h: WKScriptMessageHandler) { u.add(h, contentWorld: .page, name: \"x\") }' >> ios/ReelFree/WebTab.swift"
+  scheck page-eval          "printf '%s\n' 'func g(w: WKWebView) { w.evaluateJavaScript(\"0\", in: nil, in: .page) { _ in } }' >> ios/ReelFree/WebTab.swift"
+  scheck page-instagram     "sed -i 's/case .instagram: return nil/case .instagram: return \"youtube-ads\"/' ios/ReelFree/Site.swift"
+  scheck page-resource      "sed -i 's/return \"youtube-ads\"/return \"youtube\"/' ios/ReelFree/Site.swift"
+  scheck page-no-resource   'rm ios/ReelFree/Site.swift'
+  scheck yml-web-resource   "sed -i 's|    sources: \\[ReelFree\\]|    sources:\n      - ReelFree\n      - path: ../web/extra.js|' ios/project.yml"
+  scheck adblock-ignore     "sed -i 's/\"block\"/\"ignore-previous-rules\"/' ios/ReelFree/adblock-rules.json"
+  scheck adblock-no-filter  "printf '%s\n' '[{\"trigger\": {}, \"action\": {\"type\": \"block\"}}]' > ios/ReelFree/adblock-rules.json"
+  scheck adblock-core       "printf '%s\n' '[{\"trigger\": {\"url-filter\": \"googlevideo\"}, \"action\": {\"type\": \"block\"}}]' > ios/ReelFree/adblock-rules.json"
+  scheck adblock-bad-json   "printf 'not json' > ios/ReelFree/adblock-rules.json"
   scheck app-bound-missing  "sed -i 's/limitsNavigationsToAppBoundDomains = true/limitsNavigationsToAppBoundDomains = nope/' ios/ReelFree/App.swift"
   scheck no-swift           'rm ios/ReelFree/App.swift'
   scheck no-ios             'rm -rf ios'
@@ -541,9 +739,10 @@ if [ "$mode" != --swift ]; then
   [ -f "$ROOT/web/instagram.js" ] || fail "file not found: web/instagram.js" 2
   # Every script in web/ is injected or could be: each one must be a known, checked file.
   stray=$(find "$ROOT/web" -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) \
-            ! -path "$ROOT/web/instagram.js" ! -path "$ROOT/web/youtube.js" -printf '%P ' 2>/dev/null)
+            ! -path "$ROOT/web/instagram.js" ! -path "$ROOT/web/youtube.js" \
+            ! -path "$ROOT/web/youtube-ads.js" -printf '%P ' 2>/dev/null)
   [ -z "$stray" ] || note 1 "unexpected script(s) in web/: $stray"
-  for f in "$ROOT/web/instagram.js" "$ROOT/web/youtube.js"; do
+  for f in "$ROOT/web/instagram.js" "$ROOT/web/youtube.js" "$ROOT/web/youtube-ads.js"; do
     [ -f "$f" ] || continue
     name=$(basename "$f" .js)
     printf '== web/%s.js\n' "$name"

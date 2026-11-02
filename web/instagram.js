@@ -24,7 +24,7 @@
     feedVariant: 'following'   // 'following' (only accounts you follow) | 'default' ("Pour vous", mostly suggestions)
   };
 
-  var VERSION = '0.2.0';
+  var VERSION = '0.3.0';
   var TOKEN_KEY = 'reelfree:dm-allow';   // value: "<reelId>:<createdAtMs>"
   var POLL_MS = 250;
   var DM_TAP_WINDOW_MS = 1500;   // D2 fallback: a tap-driven navigation happens within a few hundred ms
@@ -283,17 +283,16 @@
     '  display: flex; align-items: center; justify-content: center;',
     '  font: 600 18px -apple-system, system-ui, sans-serif; color: #888; background: #fff; z-index: 2147483647; }',
 
+    // D01 (perf): no :has() anywhere. On Instagram's large DOM every mutation re-evaluates :has()
+    // rules on iPhone; containers are flagged by JS instead (scanNodes, before the next paint).
+
     // R1: Reels tab in navigation, on every route (incl. DMs), with its menu item container.
-    // Each :has() selector sits in its own rule: an engine without :has() drops only that rule.
     'a[href="/reels/"]' + HIDE,
-    'div[role="menuitem"]:has(> a[href="/reels/"])' + HIDE,
-    'li:has(> a[href="/reels/"])' + HIDE,
+    '[data-reelfree-nav]' + HIDE,
 
     // R1/R4: outside DMs, every link to a reel and the feed post that holds it.
     NOT_DM + ' a[href*="/reel/"], ' + NOT_DM + ' a[href*="/reels/"]' + HIDE,
-    NOT_DM + ' ' + SEL.feedPost + ':has(a[href*="/reel/"])' + HIDE,
-    NOT_DM + ' ' + SEL.feedPost + ':has(a[href*="/reels/"]:not([href*="/reels/audio/"]))' + HIDE,
-    NOT_DM + ' ' + SEL.feedPost + '[data-reelfree-reel]' + HIDE,   // JS flag, works without :has()
+    NOT_DM + ' ' + SEL.feedPost + '[data-reelfree-reel]' + HIDE,
 
     // R3 (reel served as /p/<id>): on a post outside DMs, hide video players.
     'html[data-rf-mode="post"] video, html[data-rf-mode="post"] [aria-label="Video player"]' + HIDE,
@@ -312,7 +311,6 @@
     // S2: suggested posts (header label) and everything after Instagram's own "caught up" marker.
     FEED + ' ' + SEL.feedPost + '[data-reelfree-sugg]' + HIDE,
     FEED + ' ' + SEL.feedPost + '[data-reelfree-ad]' + HIDE,
-    FEED + ' ' + SEL.feedPost + ':has(a[href^="/ads/"])' + HIDE,
     FEED + ' [data-reelfree-caughtup] ~ *, ' + FEED + '[data-rf-capped] ' + SEL.feedPost + '[data-reelfree-last] ~ *' + HIDE,
 
     // S3: feedMode 'off' — stories, DMs, profile, notifications stay.
@@ -543,31 +541,75 @@
     return n;
   }
 
-  function processFeed() {
-    var limit = feedLimit();
-    var hardCap = limit * 3;
-    var posts = document.querySelectorAll(SEL.feedPost);
-    for (var i = 0; i < posts.length; i++) {
-      var a = posts[i];
-      var reel = !!a.querySelector(SEL.reelLink);
-      var ad = !!a.querySelector(SEL.adLink);
-      var sugg = !reel && !ad && isSuggested(a);
-      setFlag(a, 'data-reelfree-reel', reel);
-      setFlag(a, 'data-reelfree-ad', ad);
-      setFlag(a, 'data-reelfree-sugg', sugg);
-      var counts = !reel && !ad && !sugg;
-      seqFor(a, state.feedSeenKeys, false);   // every post, for the hard cap
-      var n = counts ? seqFor(a, state.feedKeys, true) : -1;
-      setFlag(a, 'data-reelfree-cap', counts ? n > limit : state.feedSeq >= limit);
-      setFlag(a, 'data-reelfree-last', counts && n === limit);
-    }
-    setFlag(root, 'data-rf-capped', state.feedSeq >= limit || state.feedSeen >= hardCap);
-    markCaughtUp();
+  // Flags one post: reel and ad on every route (CSS gates them by mode), cap and suggestions in the
+  // feed only. Idempotent: sequence numbers are kept on the element and by shortcode.
+  function scanArticle(a, feed, limit) {
+    var reel = !!a.querySelector(SEL.reelLink);
+    var ad = !!a.querySelector(SEL.adLink);
+    setFlag(a, 'data-reelfree-reel', reel);
+    setFlag(a, 'data-reelfree-ad', ad);
+    if (!feed) return;
+    var sugg = !reel && !ad && isSuggested(a);
+    setFlag(a, 'data-reelfree-sugg', sugg);
+    var counts = !reel && !ad && !sugg;
+    seqFor(a, state.feedSeenKeys, false);   // every post, for the hard cap
+    var n = counts ? seqFor(a, state.feedKeys, true) : -1;
+    setFlag(a, 'data-reelfree-cap', counts ? n > limit : state.feedSeq >= limit);
+    setFlag(a, 'data-reelfree-last', counts && n === limit);
   }
 
-  function markCaughtUp() {
-    var img = document.querySelector('main ' + SEL.caughtUpImg);
-    if (img && img.parentElement) setFlag(img.parentElement, 'data-reelfree-caughtup', true);
+  // R1: menu item / list item that wraps the Reels tab (replaces a :has() rule).
+  function scanNav(a) {
+    var p = a.parentElement;
+    if (!p || !(p.tagName === 'LI' || (p.tagName === 'DIV' && p.getAttribute('role') === 'menuitem'))) return;
+    setFlag(p, 'data-reelfree-nav', !!p.querySelector(':scope > a[href="/reels/"]'));
+  }
+
+  function scanNavParent(p) {
+    if (p.hasAttribute('data-reelfree-nav')) setFlag(p, 'data-reelfree-nav', !!p.querySelector(':scope > a[href="/reels/"]'));
+  }
+
+  function byDocOrder(x, y) {
+    return x === y ? 0 : (x.compareDocumentPosition(y) & 4 ? -1 : 1);   // 4 = DOCUMENT_POSITION_FOLLOWING
+  }
+
+  // D01: work on the given subtrees only (added nodes, changed links), never a global re-scan in
+  // the mutation path. scanNodes([root]) is the full pass, run on route or config change only.
+  // ups: parents of removed nodes; only the post above them is re-checked (never their subtree).
+  function scanNodes(nodes, ups) {
+    var feed = currentMode === 'feed';
+    var arts = [];
+    var i, j, n, list;
+    for (i = 0; ups && i < ups.length; i++) {
+      n = ups[i];
+      if (!n.isConnected) continue;
+      scanNavParent(n);
+      n = n.closest('article');
+      if (n) arts.push(n);
+    }
+    for (i = 0; i < nodes.length; i++) {
+      n = nodes[i];
+      if (!n || n.nodeType !== 1 || !n.isConnected) continue;
+      var up = n.closest('article');
+      if (up) arts.push(up);
+      list = n.getElementsByTagName('article');
+      for (j = 0; j < list.length; j++) arts.push(list[j]);
+      if (n.tagName === 'A' && n.getAttribute('href') === '/reels/') scanNav(n);
+      else if (n.tagName === 'A' && n.parentElement && n.parentElement.hasAttribute('data-reelfree-nav')) scanNav(n);
+      list = n.querySelectorAll('a[href="/reels/"]');
+      for (j = 0; j < list.length; j++) scanNav(list[j]);
+      var img = n.matches(SEL.caughtUpImg) ? n : n.querySelector(SEL.caughtUpImg);
+      if (img && img.parentElement && img.closest('main')) setFlag(img.parentElement, 'data-reelfree-caughtup', true);
+    }
+    if (arts.length > 1) arts.sort(byDocOrder);   // feed numbering follows document order
+    var limit = feedLimit();
+    var prev = null;
+    for (i = 0; i < arts.length; i++) {
+      if (arts[i] === prev) continue;
+      prev = arts[i];
+      if (prev.closest('main')) scanArticle(prev, feed, limit);
+    }
+    if (feed) setFlag(root, 'data-rf-capped', state.feedSeq >= limit || state.feedSeen >= limit * 3);
   }
 
   // ---------------------------------------------------------------------------
@@ -784,6 +826,12 @@
         if (!mergeConfig(CONFIG, msg.config).length) return;
         state.lastPath = null;   // re-decide the current route with the new settings
         checkRoute();
+      } else if (msg.type === 'route') {
+        // Avenant 4: the app pushes every URL change (KVO), so the app needs no polling. The path
+        // is only a hint: the decision always reads window.location.
+        if (typeof msg.path !== 'string') return;
+        if (msg.via === 'popstate') onPopstate();
+        else checkRoute();
       } else if (msg.type === 'dmReelDenied') {
         // Fail closed: the app refused this reel, drop any local permission for it.
         if (typeof msg.id === 'string' && memToken && memToken.id === msg.id) clearToken();
@@ -797,7 +845,8 @@
 
   function hookHistory(name) {
     // Note: under the Userscripts app's default content-world injection, this wraps the
-    // isolated-world history object; the page's own calls may bypass it. Polling covers that.
+    // isolated-world history object; the page's own calls bypass it. Standalone: polling covers that;
+    // app: onNative {type: "route"} (Avenant 4) plus the mutation pass.
     try {
       var orig = window.history[name];
       if (typeof orig !== 'function') return;
@@ -809,39 +858,74 @@
     } catch (e) { /* ignore: polling fallback */ }
   }
 
-  function onRouteAllowed() {
+  // Route-level state: cheap, no DOM-wide query (dmOverlay looks up one dialog, in DMs only).
+  function routeChrome() {
     applyAttrs();
     updateDynStyle();
     ensureBackButton();
     state.dmOverlay = currentMode === 'dm' && !!document.querySelector('[role="dialog"]');
-    if (currentMode === 'feed') processFeed();
-    else setFlag(root, 'data-rf-capped', false);
-    if (currentMode === 'feed-off') markCaughtUp();
+    if (currentMode !== 'feed') setFlag(root, 'data-rf-capped', false);
     if (currentMode === 'post') pauseMedia();   // display:none does not always silence iOS
   }
 
-  function onMutations() {
+  // Full pass, on a new route (or new settings) only.
+  function onRouteAllowed() {
+    routeChrome();
+    scanNodes([root]);
+  }
+
+  function onMutations(nodes, ups) {
     applyAttrs();   // the page may have rewritten <html> attributes
     if (!styleEl.isConnected) styleEl = injectStyle('reelfree-style', CSS);
-    checkRoute();
+    var before = state.lastPath;
+    checkRoute();   // also a route fallback in the app, where the page's pushState is not hooked
     if (masked) { pauseMedia(); return; }
+    if (state.lastPath !== before) return;   // the new route already ran a full pass
     try {
-      onRouteAllowed();
+      routeChrome();
+      scanNodes(nodes, ups);
     } catch (e) {
       setMask(true);
     }
   }
 
-  // Single throttled MutationObserver (X4): at most one pass every MO_THROTTLE_MS.
-  var MO_THROTTLE_MS = 150;
+  // Single MutationObserver (X4), batched once per frame (D01): added nodes and changed links are
+  // queued, then scanned in requestAnimationFrame, i.e. before the next paint. No timer while the
+  // DOM is still. Past MO_MAX_QUEUE nodes the batch becomes a full pass.
+  var MO_MAX_QUEUE = 2000;
+  var MO_FALLBACK_MS = 100;
+  var moQueue = [];
+  var moUp = [];   // parents of removed nodes: only their containers (ancestors) are re-checked
+  var moFull = false;
   var moScheduled = false;
-  var observer = new MutationObserver(function () {
+  var moTimer = 0;
+  function flushMutations() {
+    if (!moScheduled) return;
+    moScheduled = false;
+    window.clearTimeout(moTimer);
+    var nodes = moFull ? [root] : moQueue;
+    var ups = moFull ? [] : moUp;
+    moQueue = [];
+    moUp = [];
+    moFull = false;
+    onMutations(nodes, ups);
+  }
+  var observer = new MutationObserver(function (records) {
+    for (var i = 0; i < records.length && !moFull; i++) {
+      var r = records[i];
+      if (r.type === 'attributes') moQueue.push(r.target);
+      else {
+        for (var j = 0; j < r.addedNodes.length; j++) if (r.addedNodes[j].nodeType === 1) moQueue.push(r.addedNodes[j]);
+        if (r.removedNodes.length && r.target.nodeType === 1) moUp.push(r.target);
+      }
+      if (moQueue.length + moUp.length > MO_MAX_QUEUE) { moFull = true; moQueue = []; moUp = []; }
+    }
     if (moScheduled) return;
     moScheduled = true;
-    window.setTimeout(function () {
-      moScheduled = false;
-      onMutations();
-    }, MO_THROTTLE_MS);
+    if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(flushMutations);
+    // Fallback: rAF is suspended while a navigation is pending or the WebView is hidden, and the
+    // fail-closed guards (style restore, mask) must still run. One-shot, cleared by the frame.
+    moTimer = window.setTimeout(flushMutations, MO_FALLBACK_MS);
   });
 
   // --- Boot ------------------------------------------------------------------
@@ -878,8 +962,10 @@
     window.addEventListener('touchstart', onTouchStart, { capture: true, passive: true });
     window.addEventListener('pointerdown', onDmTap, true);
     window.addEventListener('keydown', blockScroll, true);
-    window.setInterval(checkRoute, POLL_MS);
-    observer.observe(root, { childList: true, subtree: true });
+    // Standalone (Userscripts app) only: in the app, routes come from onNative {type: "route"}.
+    if (!BRIDGE) window.setInterval(checkRoute, POLL_MS);
+    // href: React recycles nodes and rewrites links in place.
+    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['href'] });
     // Separate, synchronous guard on our own <html> attributes: restore immediately if the page strips them.
     new MutationObserver(applyAttrs).observe(root, { attributes: true, attributeFilter: ['data-reelfree', 'data-rf-mode'] });
     post({ type: 'ready', script: 'instagram', version: VERSION });

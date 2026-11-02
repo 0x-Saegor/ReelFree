@@ -135,7 +135,11 @@ test.describe('app mode — history', () => {
 
   test('history traversal posts route with via: "popstate" (Avenant 2)', async ({ page }) => {
     await open(page, '/');
-    await page.evaluate(() => window.__spa.go('/feed/subscriptions'));
+    // Avenant 4: no polling in the app; the native side pushes the URL change (KVO) after pushState.
+    await page.evaluate(() => {
+      window.__spa.go('/feed/subscriptions');
+      window.reelfree.onNative({ type: 'route', path: location.pathname });
+    });
     await expect.poll(() => page.evaluate(() => window.__rfMsgs.filter((x) => x.type === 'route').length)).toBe(2);
     await page.evaluate(() => history.back());
     await expect.poll(() => page.evaluate(() => window.__rfMsgs.filter((x) => x.type === 'route').pop()))
@@ -152,5 +156,59 @@ test.describe('standalone mode', () => {
     await open(page, '/');
     expect(await attr(page, 'data-rfy-mode')).toBe('home');
     expect(await page.evaluate(() => typeof window.reelfree)).toBe('undefined');
+  });
+});
+
+// D01: perf non-regression (no :has(), no polling in the app) and incremental Shorts flagging.
+test.describe('D01 perf — app mode', () => {
+  test.use({ preInit: [
+    'window.__rfIntervals = 0; { const si = window.setInterval; window.setInterval = function () { window.__rfIntervals++; return si.apply(window, arguments); }; }',
+    fakeApp({})
+  ] });
+
+  test('no setInterval and no :has() in the injected CSS', async ({ page }) => {
+    await open(page, '/');
+    expect(await page.evaluate(() => window.__rfIntervals)).toBe(0);
+    const css = await page.evaluate(() => [...document.querySelectorAll('style[id^="reelfree"]')].map((s) => s.textContent).join('\n'));
+    expect(css).toContain('data-reelfree-shorts');
+    expect(css).not.toContain(':has(');
+  });
+
+  test('a page pushState is decided on onNative {type: "route"} (no polling)', async ({ page }) => {
+    await open(page, '/');
+    await page.evaluate(() => window.__spa.go('/feed/subscriptions'));
+    await page.waitForTimeout(400);
+    expect(await attr(page, 'data-rfy-mode')).toBe('home');
+    await page.evaluate(() => window.reelfree.onNative({ type: 'route', path: '/feed/subscriptions' }));
+    expect(await attr(page, 'data-rfy-mode')).not.toBe('home');
+  });
+
+  test('Short items appended or rewritten in place are hidden, and shown again when they stop being Shorts', async ({ page }) => {
+    await open(page, '/');
+    await page.evaluate(() => {
+      const grid = document.getElementById('home-grid');
+      grid.insertAdjacentHTML('beforeend',
+        '<ytm-rich-item-renderer id="late-short"><a href="/shorts/DDDDDDDDDDD">late</a></ytm-rich-item-renderer>' +
+        '<ytm-rich-section-renderer id="late-shelf"><ytm-reel-shelf-renderer></ytm-reel-shelf-renderer></ytm-rich-section-renderer>');
+    });
+    await page.waitForTimeout(150);
+    expect(await shown(page, '#late-short')).toBe(false);
+    expect(await shown(page, '#late-shelf')).toBe(false);
+    // YouTube recycles renderers: the same item now holds a regular video, then a Short again.
+    await page.evaluate(() => document.querySelector('#video-short a').setAttribute('href', '/watch?v=EEEEEEEEEEE'));
+    await page.waitForTimeout(150);
+    expect(await shown(page, '#video-short')).toBe(true);
+    await page.evaluate(() => document.querySelector('#video-1 a').setAttribute('href', '/shorts/FFFFFFFFFFF'));
+    await page.waitForTimeout(150);
+    expect(await shown(page, '#video-1')).toBe(false);
+  });
+});
+
+test.describe('D01 perf — standalone (control)', () => {
+  test.use({ preInit: ['window.__rfIntervals = 0; { const si = window.setInterval; window.setInterval = function () { window.__rfIntervals++; return si.apply(window, arguments); }; }'] });
+
+  test('keeps its polling fallback', async ({ page }) => {
+    await open(page, '/');
+    expect(await page.evaluate(() => window.__rfIntervals)).toBe(1);
   });
 });

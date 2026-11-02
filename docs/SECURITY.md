@@ -1,6 +1,6 @@
 # Sécurité — ReelFree (app iOS)
 
-Document maintenu par `rf-ops`. Il couvre l'app iOS (`ios/`), les scripts injectés (`web/instagram.js`, `web/youtube.js`) et la chaîne de build et de distribution (GitHub Actions vers TestFlight).
+Document maintenu par `rf-ops`. Il couvre l'app iOS (`ios/`), les scripts injectés (`web/instagram.js` et `web/youtube.js` en monde isolé, `web/youtube-ads.js` en monde `.page`), le bloqueur de pubs natif (`ios/ReelFree/Resources/adblock-rules.json`) et la chaîne de build et de distribution (GitHub Actions vers TestFlight).
 Règles de référence : `CLAUDE.md`, section « Règles de sécurité ». En cas de conflit, `CLAUDE.md` prévaut.
 L'ancien modèle de menace, celui du userscript Safari, est archivé dans `archive/safari-userscript/SECURITY-userscript.md`.
 
@@ -79,9 +79,22 @@ Inchangé par rapport au userscript : le script **n'agit jamais au nom de l'util
 | Build expiré (90 jours) | Cron mensuel. Le dépôt est public : GitHub désactive le cron après 60 jours sans commit. Il faut alors le réactiver (`docs/TESTFLIGHT.md` § 7). |
 | Logs publics (dépôt public) | L'archive et l'export écrivent dans un fichier temporaire. Seules les lignes d'erreur sont affichées, sans les lignes `Apple Distribution:` qui contiennent le nom réel du titulaire. Aucun artefact de l'archive n'est publié. Logs effacés en fin de job. Aucun email, nom réel ou donnée Instagram dans le dépôt (règle `CLAUDE.md`). |
 
+### T9 — Monde `.page` et bloqueur de pubs (D04, D05, avenant 5)
+`web/youtube-ads.js` est la **seule** exception au monde isolé. Il tourne à côté du code de YouTube, qui peut le lire, le remplacer ou le défaire.
+| Risque | Contrôles |
+|---|---|
+| La page atteint le bridge via le script `.page` | Aucun message handler dans `.page` : le seul `add(…, contentWorld: .defaultClient, name: "reelfree")` est vérifié par `bin/verify`. Le script ne nomme ni `webkit`, ni `messageHandlers`, ni `RF_CONFIG`, ni `onNative` (règle `page:bridge`). Il n'émet aucun événement et n'en écoute aucun (`page:events`), et ne fait pas de `postMessage` : il n'existe aucun canal vers `youtube.js`. |
+| Le script `.page` sert de relais réseau ou d'exfiltration | Le seul appel au `fetch` de la page est `origFetch.apply(this, arguments)`, qui transmet les arguments de la page sans rien y ajouter (`page:fetch-call`). Pas de `fetch(` direct, pas de `new Request`, pas de XHR et **aucune** URL littérale. Il ne lit ni stockage ni DOM, n'a pas de minuterie et ne navigue pas (`page:storage`, `page:dom`, `page:timer`, `page:navigation`). |
+| Le script `.page` pollue la page ou expose un global | Un seul IIFE en mode strict (`page:iife`). Le seul global réassigné est `window.fetch` ; `JSON.parse` est enveloppé ; `defineProperty` n'est permis que sur `window` (piège de `ytInitialPlayerResponse`) ; pas de `__proto__`, pas de `setPrototypeOf`, pas d'affectation dans un `prototype` (`page:global`, `page:define`). Les suppressions portent sur trois clés fixes, en propriété propre. |
+| Le script `.page` agit hors YouTube ou dans des frames | Swift : un seul `WKUserScript` en `.page`, dans `WebTab.swift`, sous la forme exacte `source: page, .atDocumentStart, forMainFrameOnly: true, in: .page`. `pageScriptResource` vaut `nil` pour Instagram et `"youtube-ads"` pour YouTube. JS : garde `if (!hostAllowed(window.location.hostname)) return;` avec `/(^|\.)youtube\.com$/` (`page:host-guard`, `page:host-regex`). Une page de connexion `accounts.google.com` dans l'onglet YouTube n'exécute donc rien. |
+| Une protection ReelFree dépend du monde `.page` | Aucune : la garde de route, le masque, les Shorts et le repli anti-pub sont natifs ou dans `youtube.js` (isolé). Si la page défait `youtube-ads.js`, seules les pubs reviennent. |
+| Règles de blocage téléchargées ou détournées | Le JSON est embarqué. `AdBlocker` le lit dans le bundle et le compile avec `WKContentRuleListStore`, sans aucune API réseau (règles `net:*` Swift). `bin/verify` accepte seulement les actions `block` et `css-display-none` (ni `ignore-previous-rules`, ni `make-https`, ni action inconnue). Chaque règle doit avoir un `url-filter`. |
+| Règle qui casse la connexion ou la lecture | `bin/verify` (`adblock:breaks-core`) refuse toute règle `block` qui correspond à une URL cœur : document Instagram ou YouTube, `/youtubei/v1/player`, `googlevideo.com/videoplayback`, `ytimg`, `cdninstagram`, `fbcdn`, `accounts.google.com`, `gstatic`. La compilation des règles est testée par XCTest (`AdBlockRulesTests`). |
+| Ressource web non vérifiée embarquée | `project.yml` ne peut référencer que `web/instagram.js`, `web/youtube.js` et `web/youtube-ads.js` (`build:web-resource`). Tout autre script dans `web/` fait échouer `bin/verify`. La CI vérifie que l'`.app` contient ces trois scripts, identiques à `web/`, ainsi que `adblock-rules.json` et `PrivacyInfo.xcprivacy`. |
+
 ## 3. Contrôles automatiques — `bin/verify`
 
-`bin/verify` sans argument vérifie tout et sort avec `OK instagram=… youtube=… swift=N` ou `FAIL <raison>`. `--js` et `--swift` restreignent le périmètre. `--selftest` vérifie que chaque règle attrape un échantillon fautif (98 cas). Le scan est brut : commentaires compris.
+`bin/verify` sans argument vérifie tout et sort avec `OK instagram=… youtube=… youtube-ads=… swift=N` ou `FAIL <raison>`. `--js` et `--swift` restreignent le périmètre. `--selftest` vérifie que chaque règle attrape un échantillon fautif (142 cas). Le scan est brut : commentaires compris.
 
 | Zone | Refusé |
 |---|---|
@@ -90,11 +103,14 @@ Inchangé par rapport au userscript : le script **n'agit jamais au nom de l'util
 | JS : code | `eval`, `Function(`, `.constructor(`, timers avec une chaîne, `import`/`require`, sinks HTML, obfuscation (`atob`, `fromCharCode`, `\xNN`…), accès indexé aux globaux |
 | JS : stockage | `localStorage`, IndexedDB, caches, cookies, `sessionStorage` en masse ou sous une clé non préfixée `reelfree:` |
 | JS : texte | erreur de syntaxe (fail-open), caractères bidi ou invisibles, lignes de plus de 400 caractères |
+| JS monde `.page` (`youtube-ads.js`, en plus des règles ci-dessus) | toute mention de `webkit`, `messageHandlers`, `RF_CONFIG`, `onNative` ou `reelfree.` dans le code (même sans `postMessage`) ; tout `sessionStorage` ; DOM (`document.`, `querySelector`, `getElement*`, `MutationObserver`, `.click(`) ; événements (`addEventListener`, `dispatchEvent`, `CustomEvent`, `MessageChannel`, `BroadcastChannel`) ; minuteries et rAF ; navigation (`location.* =`, `assign`, `replace`, `reload`, `history.`) ; `globalThis`, `window.x =` sauf `window.fetch = wrapped` ; `defineProperty` hors `(window, name, …)`, `__proto__`, `setPrototypeOf`, `prototype.x =` ; appel de `origFetch` autre que `.apply(this, arguments)` ; `new Request` ; toute URL littérale. Obligatoires : un seul IIFE en `'use strict'`, la garde d'hôte et la regex `youtube.com`. |
 | Swift : réseau | `URLSession*`, `NSURLConnection`, CFNetwork, `NW*`, `contentsOf: URL(string:`, gestion de challenge TLS (`serverTrust`, `URLAuthenticationChallenge`) |
-| Swift : WebView | `limitsNavigationsToAppBoundDomains = false` ou absence de `= true` ; monde `.page` ; `WKUserScript`, `evaluateJavaScript` ou handler sans `.defaultClient` ; `forMainFrameOnly` absent ou `false` ; popups automatiques ; `allowsLinkPreview = true` |
+| Swift : WebView | `limitsNavigationsToAppBoundDomains = false` ou absence de `= true` ; monde `.page`, sauf le seul `WKUserScript` de `youtube-ads.js` décrit en T9 ; `pageScriptResource` autre que `nil` (Instagram) ou `"youtube-ads"` ; `WKUserScript`, `evaluateJavaScript` ou handler sans `.defaultClient` ; `forMainFrameOnly` absent ou `false` ; popups automatiques ; `allowsLinkPreview = true` |
 | Swift : données | cookies, `UIPasteboard`, trousseau, IDFA/IDFV, SDK de tracking connus, `dlopen`, `NSClassFromString` |
 | Swift : dépendances | `import` hors liste blanche, SPM, Pods, Carthage, frameworks binaires |
 | Config | exceptions ATS (Info.plist ou `project.yml`), `WKAppBoundDomains` absent, vide, de plus de 10 entrées ou hors liste, `PrivacyInfo.xcprivacy` absent, avec tracking, ou avec données collectées |
+| Bloqueur (`ios/**/*rules*.json`) | JSON invalide ou vide, action autre que `block` ou `css-display-none`, règle sans `url-filter`, règle `block` qui correspond à une URL cœur (T9) |
+| Ressources | `project.yml` qui référence un fichier de `web/` autre que les trois scripts vérifiés ; tout autre script dans `web/` |
 | Dépôt | clés, certificats, profils, blocs `PRIVATE KEY` |
 
 Le scan est un filet, pas une preuve : il n'attrape pas toutes les formes d'obfuscation. La revue manuelle (§ 4) reste obligatoire.
@@ -146,8 +162,35 @@ Points vérifiés et conformes :
 - **Données et workflows :** aucun accès aux cookies, aucune journalisation, `UserDefaults` limité à 4 réglages. Pas de permission caméra ni micro. Pas d'interpolation `${{ github.event.* }}` dans les `run:`. Secrets limités aux étapes qui en ont besoin. `.p8` en `umask 077`, effacée en fin de job.
 <!-- review:end -->
 
+## 5 bis. Revue D06 — bloqueur natif (D04) et monde `.page` (D05), 2026-11-02
+
+<!-- review-d06:begin -->
+**Aucun constat majeur. L'exception du monde `.page` est acceptée dans les limites de T9.**
+La revue porte sur le diff non poussé après les avenants 4 et 5 et D07 : `ios/` (WebTab, RouteVia, AdBlock, ContentView, project.yml), `web/youtube-ads.js`, et les diffs de `web/instagram.js` et `web/youtube.js`. Elle combine une relecture rf-ops (natif, règles, workflows) et une relecture indépendante des scripts par un sous-agent. Résultats : `bin/verify` OK (`swift=16`), self-test 142/142, `npm test` 394/394. Dernière CI poussée (0254087) verte, avec un artefact IPA de 122 Ko. Le diff local n'est pas encore passé en CI.
+
+Points vérifiés et conformes :
+- **Monde `.page`** : script injecté uniquement dans l'onglet YouTube, au document-start, dans la frame principale. Aucun handler ni `evaluateJavaScript` en `.page`. Le script `.page` est facultatif : s'il manque, l'app fonctionne sans lui, et `youtube.js` (isolé) reste obligatoire (fail-closed).
+- **youtube-ads.js** : aucune requête propre, aucune URL, aucun stockage, aucun DOM, aucun global hors `fetch` et `JSON.parse`. Ses suppressions portent sur 3 clés fixes, en propriété propre, donc pas de pollution de prototype. Garde d'hôte correcte (`notyoutube.com` refusé).
+- **Bloqueur** : 14 règles, toutes `block`, JSON embarqué, compilé hors du chemin de lancement. Aucune ne touche une URL cœur. Identifiant de store dérivé d'une empreinte FNV-1a, sans valeur de sécurité (cache seulement).
+- **Avenant 4** : `onNative({type:"route"})` est envoyé par `evaluateJavaScript(…, in: .defaultClient)`, que la page ne peut pas forger. Le JS relit toujours `window.location`. `via:"popstate"` consomme le jeton DM sans admettre de média (fail-closed). Côté natif, `.backForward` et le bouton Précédent annulent le jeton. Plus de `setInterval` en mode app.
+- **D07** : le mode immersif ne change ni la garde ni le masque. Le geste de retour passe par `decidePolicyFor`/KVO comme une traversée d'historique. `ReelFreeWebView` force des safe-area nulles (affichage seulement). Le tap observé sur la page ne fait que masquer les barres.
+
+Constats mineurs (notés, non bloquants) :
+
+| # | Où | Constat | Suite |
+|---|---|---|---|
+| G1 | `web/youtube-ads.js`, enveloppe `fetch` (`.then` de `json()`) | Une exception dans le callback de succès (`JSON.stringify` ou `new Response`) n'est pas rattrapée : la promesse rejette au lieu de rendre `res`, contrairement à l'avenant 5 (« la valeur d'origine est rendue telle quelle »). Effet possible : le lecteur ne charge pas. | rf-web : mettre le corps du callback dans un `try/catch` qui rend `res`, et ajouter un test. |
+| G2 | `web/instagram.js` (`scanArticle`), `web/youtube.js` (`scanLabel`, `scanContainer`) | Depuis D01, le masquage des conteneurs dépend d'attributs `data-reelfree-*`. Les observers ne surveillent pas ces attributs : si la page les retire d'un nœud recyclé, le conteneur réapparaît jusqu'au prochain scan de ce nœud. Les liens directs vers un reel ou un Short restent masqués par leurs propres règles. | rf-web : ajouter `data-reelfree-reel`, `-shorts` et `-nav` à `attributeFilter` et remarquer le nœud quand ils sont retirés. Sinon, documenter ce risque comme accepté dans la spec. |
+| G3 | `web/youtube.js`, `skipAd` | Le repli se fie à `.ad-showing` (contrôlé par la page). Une classe restée en place pourrait couper le son de la vraie vidéo et la mettre à sa fin, et le clic vise tout élément qui correspond à `SKIP_SEL`. Effet limité à la lecture : pas de sécurité ni de donnée en jeu. | rf-web : exiger en plus l'interface pub (`.ytp-ad-player-overlay`) ou une durée courte. |
+| G4 | `web/youtube-ads.js`, `module.exports` | En monde `.page`, si la page définit un global `module`, le script y écrit ses fonctions. C'est improbable au document-start. | rf-web, optionnel : tester `typeof window === 'undefined'` avant d'exporter. |
+| G5 | `web/*.js` | F6 toujours ouvert : 9 accès `sessionStorage` sans clé littérale (WARN de `bin/verify`). | rf-web (F6). |
+| G6 | `ios/project.yml` | `youtube-ads.js` est `optional: true` : un oubli de bundle ne serait pas détecté au build. | **Corrigé** (rf-ops) : l'étape « Package .ipa » de `ci.yml` exige les trois scripts (identiques à `web/`), les règles et le manifeste de confidentialité. |
+<!-- review-d06:end -->
+
 ## 6. Risques résiduels acceptés
 - **Confiance dans WebKit, iOS et TestFlight.** Un composant compromis contourne nos contrôles.
 - **La clé API est Admin** : c'est nécessaire pour la signature gérée dans le cloud. Atténué par l'environnement GitHub restreint et la révocation simple.
 - **Le script partage le DOM avec la page** : la page peut modifier les éléments que le script masque. La garde native couvre les routes, pas le contenu inline (par exemple un reel dans le fil). Dans ce cas, c'est le JS qui sert de seconde ligne de défense.
 - **Détection côté Instagram** : un masquage CSS reste détectable en théorie, mais il ne se distingue pas d'un bloqueur de contenu.
+- **Monde `.page`** (avenant 5, T9) : YouTube peut lire, défaire ou détecter `youtube-ads.js` (enveloppes de `fetch` et `JSON.parse`). C'est accepté : il ne porte aucune protection ReelFree et n'a aucun pouvoir que la page n'ait déjà.
+- **Bloqueur de pubs au mieux** : si la compilation des règles échoue, les onglets tournent sans bloqueur (pubs visibles, aucune protection perdue). La détection d'un bloqueur par YouTube reste possible.

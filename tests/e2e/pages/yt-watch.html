@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- Synthetic m.youtube.com watch page (D05): element names from web/youtube.js and web/youtube-ads.js,
+     no real content. The inline script assigns the player response the way YouTube does. -->
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>YouTube</title>
+<script>
+  var ytInitialPlayerResponse = {
+    playabilityStatus: { status: 'OK' },
+    videoDetails: { videoId: 'AAAAAAAAAAA', title: 'Synthetic' },
+    streamingData: { formats: [] },
+    adPlacements: [{ adPlacementRenderer: {} }],
+    playerAds: [{ playerLegacyDesktopWatchAdsRenderer: {} }],
+    adSlots: [{ adSlotRenderer: {} }]
+  };
+  window.__seenAtLoad = Object.keys(ytInitialPlayerResponse).sort();
+</script>
+</head>
+<body>
+  <ytm-ad-slot-renderer id="top-ad">Annonce</ytm-ad-slot-renderer>
+  <div id="movie_player" class="html5-video-player playing-mode">
+    <video id="vid"></video>
+    <div class="ytp-ad-skip-button-slot"><button id="skip" type="button">Ignorer</button></div>
+  </div>
+  <ytm-rich-grid-renderer id="related">
+    <ytm-rich-item-renderer id="item-video"><a href="/watch?v=BBBBBBBBBBB">Video</a></ytm-rich-item-renderer>
+    <ytm-rich-item-renderer id="item-ad"><ytm-ad-slot-renderer><a href="/watch?v=CCCCCCCCCCC">Sponso</a></ytm-ad-slot-renderer></ytm-rich-item-renderer>
+    <ytd-rich-item-renderer id="item-ad-d"><ytd-in-feed-ad-layout-renderer>Sponso</ytd-in-feed-ad-layout-renderer></ytd-rich-item-renderer>
+  </ytm-rich-grid-renderer>
+</body></html>

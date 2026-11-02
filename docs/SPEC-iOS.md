@@ -70,3 +70,28 @@ Les exigences fonctionnelles (R1–R5, D1–D4, S1–S3, X1–X4) sont dans `doc
 1. **WKAppBoundDomains** : les entrées sont des domaines enregistrables (eTLD+1) et couvrent leurs sous-domaines. Liste retenue : `instagram.com`, `cdninstagram.com`, `fbcdn.net`, `youtube.com`, `ytimg.com`, `googlevideo.com`, `google.com`, `gstatic.com` (connexion YouTube). Les scripts injectés doivent être **no-op** hors de leur hôte : instagram.js seulement sur `*.instagram.com`, youtube.js seulement sur `*.youtube.com`. La garde native ne s'applique qu'à ces hôtes.
 2. **Traversée d'historique** : le message `route` porte `via: "popstate"` quand la navigation vient de l'historique. Le natif invalide alors tout jeton DM. Pour un chargement de document, le natif ignore le jeton si `navigationType == .backForward`.
 3. **Vecteurs YouTube** : `tests/vectors/youtube.json`, au même format que policy.json, produit par rf-web et consommé par l'XCTest de rf-ios.
+
+## Avenant 4 — routes poussées par le natif, pas de polling JS (D01, 2026-11-02)
+- **Natif → JS** : à chaque changement de `webView.url` (KVO : chargement de document **et** pushState/replaceState SPA), le natif envoie `window.reelfree.onNative({type: "route", path, via})` :
+  - `path` : `url.path` (chaîne obligatoire, sinon le message est ignoré) ;
+  - `via: "popstate"` quand la navigation vient de l'historique (Précédent/Suivant), absent sinon.
+- Côté JS, `path` n'est qu'un signal : la décision relit toujours `window.location`. Avec `via: "popstate"`, la route est traitée comme une traversée d'historique (le jeton DM local est consommé sans admettre de média, comme pour l'avenant 2).
+- **En mode app, instagram.js et youtube.js n'ont plus aucun `setInterval`.** Les routes viennent du natif, de `popstate`, des hooks d'historique et d'une passe de mutation. Le polling de 250 ms ne reste qu'en mode autonome.
+- Le JS continue d'envoyer `{type: "route", ...}` au natif quand il détecte un changement : le natif peut recevoir un doublon de sa propre notification, sans conséquence.
+- Perf (contraintes testées) : aucun `:has()` dans le CSS injecté (les conteneurs sont marqués par JS : `data-reelfree-reel`, `data-reelfree-ad`, `data-reelfree-nav`, `data-reelfree-shorts`). Le MutationObserver traite seulement les nœuds ajoutés et les liens réécrits, une fois par frame (rAF, avec repli par minuterie de 100 ms). Un scan complet n'a lieu qu'au changement de route ou de réglages.
+
+## Avenant 5 — `youtube-ads.js` dans le monde `.page` (D05, 2026-11-02)
+- **Seule exception au monde isolé.** `web/youtube-ads.js` est injecté dans l'onglet YouTube seulement, au document-start, frame principale seulement, dans `WKContentWorld.page`. C'est nécessaire parce que les données du lecteur (`ytInitialPlayerResponse`, `fetch`, `JSON.parse` de la page) n'existent que dans le monde de la page.
+- **Sans bridge** : aucun message handler n'est déclaré dans `.page`. Le script ne touche pas à `window.webkit`, n'envoie rien au natif et ne reçoit rien (ni `RF_CONFIG`, ni `onNative`).
+- **Sans pouvoir** :
+  - aucune requête réseau propre : il ne fait que filtrer les réponses demandées par la page (`fetch` vers `/youtubei/v1/player`, et `JSON.parse` pour la voie XHR) ;
+  - aucune lecture de données utilisateur : il supprime seulement `adPlacements`, `playerAds` et `adSlots` à des chemins fixes (racine et `playerResponse`) ;
+  - pas de stockage, pas de cookies, pas de code dynamique, pas de sink HTML, pas de global exposé ;
+  - no-op hors de `*.youtube.com`.
+  En cas d'erreur, la valeur d'origine est rendue telle quelle.
+- La page peut voir ou défaire ce script : c'est accepté, car il ne porte **aucune protection ReelFree**. Shorts, garde de route, masque et repli anti-pub restent dans `youtube.js`, en monde isolé.
+- **Repli dans `youtube.js`** (monde isolé, pas de minuterie) :
+  - quand le lecteur a la classe `.ad-showing`, la vidéo est coupée, positionnée à sa fin, et le bouton « Ignorer » est cliqué s'il existe ;
+  - l'état muet d'origine est rétabli à la fin de la pub ;
+  - les encarts sponsorisés (`*-ad-slot-renderer`, `*-promoted-*`, `*-in-feed-ad-layout-renderer`, etc.) et les éléments de fil qui les contiennent (`data-reelfree-ad`) sont masqués.
+- Tests : `tests/unit/youtube-ads.test.js` (prune et garanties statiques de la source) et `tests/e2e/youtube-ads.spec.mjs` (page synthétique `tests/e2e/pages/yt-watch.html`).

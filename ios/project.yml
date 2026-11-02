@@ -20,6 +20,15 @@ settings:
     TARGETED_DEVICE_FAMILY: "1"
     DEVELOPMENT_TEAM: $(RF_TEAM_ID)
     CODE_SIGN_STYLE: Automatic
+  configs:
+    # D02: Release is fully optimised (also used for the unsigned .ipa and TestFlight).
+    Release:
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      SWIFT_COMPILATION_MODE: wholemodule
+      GCC_OPTIMIZATION_LEVEL: s
+      ENABLE_TESTABILITY: NO
+      DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+      VALIDATE_PRODUCT: YES
 
 targets:
   ReelFree:
@@ -36,6 +45,10 @@ targets:
         buildPhase: resources
       - path: ../web/youtube.js
         buildPhase: resources
+      # D05 (rf-web): page-world ad pruning for YouTube. Optional: the app runs without it.
+      - path: ../web/youtube-ads.js
+        buildPhase: resources
+        optional: true
     settings:
       base:
         PRODUCT_NAME: ReelFree

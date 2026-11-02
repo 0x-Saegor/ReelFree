@@ -22,6 +22,14 @@ enum Site: String {
     /// Bundle resource name of the injected script (web/<name>.js).
     var scriptResource: String { rawValue }
 
+    /// D05: optional script injected in the page world (YouTube ad pruning only). It gets no bridge.
+    var pageScriptResource: String? {
+        switch self {
+        case .instagram: return nil
+        case .youtube: return "youtube-ads"
+        }
+    }
+
     /// Registrable domains whose documents are guarded by the route policy (SPEC-iOS, amendment 1).
     var documentDomains: [String] {
         switch self {
