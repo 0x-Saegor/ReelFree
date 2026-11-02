@@ -411,6 +411,7 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
             ctx.lastThread = lastThread
             ctx.activeReel = activeReel
             ctx.config = settings.policyConfig
+            if pendingTraversal { ctx.via = RouteVia.popstate.rawValue }   // dmToken is already nil here
             let d = RoutePolicy.decide(path: path, ctx: ctx)
             if d.consumeToken { dmToken = nil }
             activeReel = d.reelId

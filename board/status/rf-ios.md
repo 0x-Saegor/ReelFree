@@ -1,4 +1,11 @@
-D02, D07 et D04 terminés (plus l'injection native de D05). 38/38 tests Swift au vert sous Linux. La compilation UIKit/SwiftUI et le test WebKit restent à valider sur la CI macOS. Je m'arrête.
+CI rouge (run 41469313797, vecteurs « P popstate ») corrigée : `PolicyContext.via` ajouté, 38/38 tests Swift au vert sous Linux. Je m'arrête.
+
+## Correctif CI — `ctx.via` (avenants 2 et 4)
+- Cause : les vecteurs « P popstate … » de `tests/vectors/policy.json` portent `ctx.via = "popstate"`, ignoré par Swift. Le jeton était donc admis (D2) au lieu d'être refusé. Reproduit sous Linux : 34 assertions en échec sans le correctif.
+- `RoutePolicy.swift` : `PolicyContext.via: String?`. Dans `decide()`, `via == "popstate"` met le jeton à nil avant toute décision, comme `decide()` dans `web/instagram.js` et `tests/unit/vectors.test.js`. Le jeton est jeté, pas consommé (`consumeToken: false`), et aucun reel n'est admis.
+- `RoutePolicyTests.context(from:)` lit `ctx.via`.
+- `WebTab.verdict(for:)` : `ctx.via = "popstate"` si `pendingTraversal`. C'est une seconde ligne, car `dmToken` est déjà à nil sur `.backForward` et sur la route `popstate` KVO.
+- Tests Linux : `swift:6.0-jammy` (Docker), paquet SwiftPM temporaire avec les sources pures (Policy, Site, RouteVia, BridgeMessage, AdBlockRules) : 38/38 au vert. À confirmer sur la CI macOS.
 
 ## D02 — Perf native
 - YouTube paresseux : `AppModel.youtube` est créé à la 1re sélection de l'onglet (`AppModel.select`). Au lancement, plus de 2e process web.

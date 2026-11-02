@@ -48,6 +48,7 @@ final class RoutePolicyTests: XCTestCase {
         }
         ctx.lastThread = json["lastThread"] as? String
         ctx.activeReel = json["activeReel"] as? String
+        ctx.via = json["via"] as? String
         if let c = json["config"] as? [String: Any] {
             if isJSONBool(c["blockExplore"]), let b = (c["blockExplore"] as? NSNumber)?.boolValue {
                 ctx.config.blockExplore = b

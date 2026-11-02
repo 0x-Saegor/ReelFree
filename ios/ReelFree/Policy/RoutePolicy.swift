@@ -23,6 +23,10 @@ struct PolicyContext {
     var lastThread: String?
     var activeReel: String?
     var config = PolicyConfig()
+    /// How the route was reached, as `ctx.via` in decide() (web/instagram.js). Only "popstate"
+    /// has a meaning (amendments 2 and 4): a history traversal never admits a reel with a DM token,
+    /// and the token is dropped, not consumed.
+    var via: String?
 }
 
 enum PolicyAction: String {
@@ -182,7 +186,9 @@ enum RoutePolicy {
     }
 
     /// Instagram policy for a raw (percent-encoded) path, as `location.pathname` would give it.
-    static func decide(path: String, ctx: PolicyContext) -> Decision {
+    static func decide(path: String, ctx inputCtx: PolicyContext) -> Decision {
+        var ctx = inputCtx
+        if ctx.via == "popstate" { ctx.token = nil }   // amendments 2, 4: traversal never spends a token
         let cfg = ctx.config
         let ttl = (cfg.dmReelTtlMs >= 0 && cfg.dmReelTtlMs.isFinite) ? cfg.dmReelTtlMs : defaultTtlMs
         let feedMode = (cfg.feedMode == "off") ? "off" : "limited"
