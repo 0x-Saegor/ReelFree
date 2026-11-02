@@ -130,3 +130,54 @@ jobs:
             ${{ runner.temp }}/tests.xcresult
             ${{ runner.temp }}/build.log
           retention-days: 7
+
+  unsigned-ipa:
+    # Unsigned Release .ipa for free 7-day sideloading (Sideloader / AltStore / Sideloadly re-sign it
+    # with the user's own Apple ID). Not used by TestFlight.
+    name: Unsigned IPA (sideload)
+    needs: [web, ios]
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build Release for device (no signing)
+        run: |
+          rc=0
+          xcodebuild build \
+            -project "$RF_PROJECT" -scheme "$RF_SCHEME" -configuration Release \
+            -destination 'generic/platform=iOS' -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            > "$RUNNER_TEMP/build.log" 2>&1 || rc=$?
+          grep -E '(error:|\*\* )' "$RUNNER_TEMP/build.log" | head -100 || true
+          exit $rc
+
+      - name: Package .ipa
+        run: |
+          app=$(find "$RUNNER_TEMP/dd/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' | head -1)
+          test -n "$app" || { echo "::error::no .app produced"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$app" "$RUNNER_TEMP/ipa/Payload/"
+          (cd "$RUNNER_TEMP/ipa" && zip -qry "$GITHUB_WORKSPACE/ReelFree-unsigned.ipa" Payload)
+          ls -l ReelFree-unsigned.ipa
+          shasum -a 256 ReelFree-unsigned.ipa | tee ReelFree-unsigned.ipa.sha256
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ReelFree-unsigned-ipa
+          path: |
+            ReelFree-unsigned.ipa
+            ReelFree-unsigned.ipa.sha256
+          retention-days: 30
