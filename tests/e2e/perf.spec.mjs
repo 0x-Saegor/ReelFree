@@ -97,6 +97,38 @@ test.describe('incremental mutation pass', () => {
     expect(await isShown(page.locator('#perf-photo'))).toBe(false);
   });
 
+  test('G2: the page stripping our flags from a reel post or the Reels item does not unhide them', async ({ page }) => {
+    await open(page, '/?variant=following');
+    await page.evaluate(() => {
+      const parent = document.querySelector('main article').parentElement;
+      const a = document.createElement('article');
+      a.id = 'g2-reel';
+      a.innerHTML = '<a href="/reel/G2REEL0001/">r</a><span></span>';
+      parent.appendChild(a);
+      const ul = document.createElement('ul');
+      ul.innerHTML = '<li id="g2-li"><a href="/reels/">Reels</a></li>';
+      document.body.appendChild(ul);
+    });
+    await page.waitForTimeout(150);
+    expect(await isShown(page.locator('#g2-reel'))).toBe(false);
+    expect(await isShown(page.locator('#g2-li'))).toBe(false);
+    await page.evaluate(() => {
+      document.getElementById('g2-reel').removeAttribute('data-reelfree-reel');
+      document.getElementById('g2-li').removeAttribute('data-reelfree-nav');
+    });
+    await page.waitForTimeout(150);
+    expect(await isShown(page.locator('#g2-reel'))).toBe(false);
+    expect(await isShown(page.locator('#g2-li'))).toBe(false);
+    // Converges: no endless re-queue of our own writes.
+    const n = await page.evaluate(() => new Promise((resolve) => {
+      let c = 0;
+      new MutationObserver((rs) => { c += rs.length; }).observe(document.documentElement,
+        { subtree: true, attributes: true, attributeFilter: ['data-reelfree-reel', 'data-reelfree-nav'] });
+      setTimeout(() => resolve(c), 300);
+    }));
+    expect(n).toBe(0);
+  });
+
   test('R1: a Reels menu item inserted later is hidden with its container', async ({ page }) => {
     await open(page, '/?variant=following');
     await page.evaluate(() => {

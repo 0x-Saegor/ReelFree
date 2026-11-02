@@ -1,6 +1,18 @@
-D01 (perf) et D05 (pubs YouTube) faits, avenants 4 et 5 ajoutés à SPEC-iOS ; npm test PASS 394/394 : en attente de nouvelles tâches.
+Constats D06 de rf-ops appliqués (G1, G3, G2, G4, G5/F6, vecteurs popstate) ; npm test PASS 409/409, bin/verify OK sans WARN : en attente de nouvelles tâches.
 
-## Livré
+## Livré (revue D06, 2026-11-02)
+- **G1** (`youtube-ads.js` v0.1.1) : le callback de succès de `json()` est dans un `try/catch` qui rend `res`. Une exception dans `JSON.stringify` ou `new Response` rend la réponse d'origine, et une requête en échec rejette toujours. Tests e2e dans `youtube-ads.spec.mjs` (« G1: … ») ; l'ancien code échoue au test (mutation vérifiée).
+- **G3** (`youtube.js`) : le repli pub n'agit sur `.ad-showing` que si l'interface pub est présente (`AD_UI_SEL` : `.ytp-ad-player-overlay`, badges et textes `ytp-ad-*`, marqué `TODO(recon)`) ou si la durée du média est ≤ 30 s. Le son n'est mémorisé et restauré que si on a agi. Tests : une pub longue avec interface est traitée ; une classe restée seule sur une vidéo de 600 s ne touche ni au son, ni à la position, ni au bouton.
+- **G2** (`instagram.js` et `youtube.js` v0.3.1) : l'observer principal surveille aussi nos drapeaux de masquage :
+  - IG : `-reel`, `-ad`, `-sugg`, `-cap`, `-last`, `-nav`, `-caughtup` ;
+  - YT : `-shorts`, `-ad`.
+
+  Seul un retrait remet le nœud en file. Poser un drapeau ne le fait pas, donc le cycle converge, ce que le test vérifie (0 enregistrement en 300 ms). Tests : `perf.spec.mjs` (post reel et item Reels) et `youtube.spec.mjs` (« G2 », item Short). Retirer les drapeaux d'`attributeFilter` fait échouer les deux (mutation vérifiée).
+- **G4** : `module.exports` n'est écrit que si `typeof window === 'undefined'`. Test unitaire `vm` avec un global `module` en contexte page.
+- **G5/F6** : le comportement F6 était déjà corrigé (aucune écriture en web storage en mode app, tests espions existants). Les 9 WARN venaient des clés passées par constante : chaque appel `sessionStorage` (mode autonome) prend désormais une clé littérale `reelfree:…`, et `flagGet`/`flagSet` lèvent une exception sur une clé inconnue. `bin/verify` : 0 WARN.
+- **Vecteurs popstate** : `policy.json` passe à 87 vecteurs, dont 8 « P popstate … ». Nouvelle clé de `ctx` : `via: "popstate"`. Sémantique : le jeton de `ctx` est ignoré avant la décision (avenants 2 et 4). Un reel avec jeton valide est refusé (vers `/` ou `lastThread`), `/p/<id>` reste un post simple (`reelId: null`), le thread reste autorisé.
+
+## Livré (D01, D05)
 - **D01 — Perf JS (iPhone 11).** instagram.js et youtube.js passent en v0.3.0.
   - **Plus aucun `:has()`** dans le CSS injecté : 5 règles côté Instagram, 20 côté YouTube. Les conteneurs sont marqués par JS (`data-reelfree-reel`, `-ad`, `-nav`, `-shorts`).
   - **MutationObserver incrémental** : seuls les nœuds ajoutés, les `href` réécrits sur place (recyclage React et Polymer) et les ancêtres d'un nœud retiré sont traités, en un lot par frame (rAF, avec repli par minuterie de 100 ms quand rAF est suspendu). Un scan complet n'a lieu qu'au changement de route ou de réglages. Plus de `querySelectorAll` global dans le chemin chaud.
@@ -64,6 +76,9 @@ D01 (perf) et D05 (pubs YouTube) faits, avenants 4 et 5 ajoutés à SPEC-iOS ; n
 - Le natif doit garder `activeReel` (le reel admis) pour appliquer D3 vers `/p/<autre>`, comme le font les vecteurs.
 
 ## Demandes
+- @rf-ios — `tests/vectors/policy.json` a une nouvelle clé de `ctx`, `via: "popstate"` : ignorer `ctx.token` avant d'appeler la politique (comme `toDecideCtx` dans `tests/unit/vectors.test.js`). Sans ce traitement, l'XCTest qui lit le fichier échouera sur les 8 vecteurs « P popstate ». `expect.consumeToken` y vaut `false` : le natif invalide son jeton à cause de `via`, pas de `consumeToken`.
+- @orchestrateur — Pour documenter `ctx.via` dans le format des vecteurs de SPEC-iOS (complément de l'avenant 4), j'ai besoin de ton accord : je n'ai pas touché à la spec.
+- @rf-ops — G1 à G5 traités (détails ci-dessus). SECURITY.md § 5 bis peut passer G1 à G5 en « Corrigé ». `bin/verify` : `OK instagram=36017d44129f youtube=ad108a0a0377 youtube-ads=5ea8af22c743`, 0 WARN.
 - @rf-ops (D06) — `bin/verify` échoue en mode complet : `unexpected script(s) in web/: youtube-ads.js` et `webview:page-world` (WebTab.swift:205-208). C'est attendu, c'est l'exception de l'avenant 5. Les scripts pris un par un passent : `bin/verify web/instagram.js` et `bin/verify web/youtube.js` donnent FINDINGS 0. Pour youtube-ads.js, les garanties statiques sont déjà testées dans `tests/unit/youtube-ads.test.js`, qui interdit webkit, stockage, cookie, eval, sinks HTML, XHR propre, beacon, WebSocket et setInterval.
 - @rf-ios (D02) — Avenant 4 : appeler `onNative({type:"route", path: url.path, via?})` à chaque changement KVO de `webView.url` (et `via:"popstate"` en back/forward). Sans cet appel, en mode app, un pushState de la page sans mutation DOM n'est vu qu'à la prochaine mutation.
 - @rf-ios — Avenant 5 : `youtube-ads.js` est livré au chemin attendu par `project.yml` (`../web/youtube-ads.js`).

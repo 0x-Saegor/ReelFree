@@ -21,7 +21,7 @@
     hideShorts: true       // hide Shorts tab, shelves and entries (redirects of /shorts/<id> always apply)
   };
 
-  var VERSION = '0.3.0';
+  var VERSION = '0.3.1';
   var POLL_MS = 250;
 
   // ---------------------------------------------------------------------------
@@ -223,7 +223,6 @@
   // Loop guard: if YouTube itself sends /watch?v=<id> back to /shorts/<id>, we would bounce forever.
   // A redirect of the SAME Short less than 5 s after the previous one stops and stays masked with a
   // message. Memory covers SPA loops; a sessionStorage flag "<videoId>:<ts>" covers full-page loops.
-  var SHORTS_LOOP_KEY = 'reelfree:yt-shorts-at';
   var SHORTS_LOOP_MS = 5000;
   var lastShorts = { id: null, at: 0 };
   function shortsLoopGuard(to) {
@@ -233,14 +232,14 @@
     // F6 (B05 review): in the app nothing is written to web storage, the guard is memory only.
     if (!BRIDGE) {
       try {
-        var m = /^([A-Za-z0-9_-]{11}):(\d{1,16})$/.exec(window.sessionStorage.getItem(SHORTS_LOOP_KEY) || '');
+        var m = /^([A-Za-z0-9_-]{11}):(\d{1,16})$/.exec(window.sessionStorage.getItem('reelfree:yt-shorts-at') || '');
         if (m && Number(m[2]) > prev.at) prev = { id: m[1], at: Number(m[2]) };
       } catch (e) { /* memory only */ }
     }
     if (prev.id === id && now - prev.at < SHORTS_LOOP_MS) return false;
     lastShorts = { id: id, at: now };
     if (!BRIDGE) {
-      try { window.sessionStorage.setItem(SHORTS_LOOP_KEY, id + ':' + now); } catch (e) { /* memory only */ }
+      try { window.sessionStorage.setItem('reelfree:yt-shorts-at', id + ':' + now); } catch (e) { /* memory only */ }
     }
     return true;
   }
@@ -329,6 +328,12 @@
   var PLAYER_SEL = '.html5-video-player, #movie_player';
   var SKIP_SEL = '.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, ' +
     '.ytp-ad-skip-button-slot button, .ytp-ad-skip-button-container button';
+  // G3: .ad-showing alone is page controlled and could stay on the real video. Act only when the
+  // ad UI is also in the player, or when the media is short enough to be an ad. TODO(recon): names
+  // checked against a real ad capture.
+  var AD_UI_SEL = '.ytp-ad-player-overlay, .ytp-ad-player-overlay-layout, .ytp-ad-preview-container, ' +
+    '.ytp-ad-simple-ad-badge, .ytp-ad-badge, .ytp-ad-text, .ytp-ad-duration-remaining';
+  var AD_MAX_SECONDS = 30;
   var weakOk = typeof WeakSet === 'function' && typeof WeakMap === 'function';
   var watchedPlayers = weakOk ? new WeakSet() : null;
   var watchedVideos = weakOk ? new WeakSet() : null;
@@ -336,6 +341,19 @@
 
   function playerOf(v) {
     return v && v.closest ? v.closest(PLAYER_SEL) : null;
+  }
+
+  function adConfirmed(player, v) {
+    if (!player.classList.contains('ad-showing')) return false;
+    if (player.querySelector(AD_UI_SEL)) return true;
+    var d = v.duration;
+    return typeof d === 'number' && isFinite(d) && d > 0 && d <= AD_MAX_SECONDS;
+  }
+
+  function actOnAd(player, v) {
+    if (!adConfirmed(player, v)) return;
+    if (!mutedBefore.has(v)) mutedBefore.set(v, !!v.muted);
+    skipAd(player, v);
   }
 
   function skipAd(player, v) {
@@ -351,21 +369,20 @@
   function onAdMedia(ev) {
     var v = ev.target;
     var p = playerOf(v);
-    if (p && p.classList.contains('ad-showing')) skipAd(p, v);
+    if (p) actOnAd(p, v);
   }
 
   function checkAd(player) {
     var v = player.querySelector('video');
     if (!v) return;
     if (player.classList.contains('ad-showing')) {
-      if (!mutedBefore.has(v)) mutedBefore.set(v, !!v.muted);
       if (!watchedVideos.has(v)) {
         watchedVideos.add(v);
         v.addEventListener('loadedmetadata', onAdMedia, true);
         v.addEventListener('durationchange', onAdMedia, true);
         v.addEventListener('playing', onAdMedia, true);
       }
-      skipAd(player, v);
+      actOnAd(player, v);
     } else if (mutedBefore.has(v)) {
       try { v.muted = mutedBefore.get(v); } catch (e) { /* ignore */ }
       mutedBefore['delete'](v);
@@ -547,6 +564,10 @@
   var moFull = false;
   var moScheduled = false;
   var moTimer = 0;
+  // Hiding flags set by this script (G2): the page stripping one from a recycled node re-checks it.
+  var MO_FLAGS = ['data-reelfree-shorts', 'data-reelfree-ad'];
+  var MO_FLAG_SET = {};
+  for (var fi = 0; fi < MO_FLAGS.length; fi++) MO_FLAG_SET[MO_FLAGS[fi]] = true;
   function flushMutations() {
     if (!moScheduled) return;
     moScheduled = false;
@@ -561,8 +582,11 @@
   var observer = new MutationObserver(function (records) {
     for (var i = 0; i < records.length && !moFull; i++) {
       var r = records[i];
-      if (r.type === 'attributes') moQueue.push(r.target);
-      else {
+      if (r.type === 'attributes') {
+        // G2: our own flags are watched too, but only a removal (by the page, or by us when the
+        // condition ends) re-checks the node; setting a flag never re-queues it, so this converges.
+        if (!MO_FLAG_SET[r.attributeName] || !r.target.hasAttribute(r.attributeName)) moQueue.push(r.target);
+      } else {
         for (var j = 0; j < r.addedNodes.length; j++) if (r.addedNodes[j].nodeType === 1) moQueue.push(r.addedNodes[j]);
         if (r.removedNodes.length && r.target.nodeType === 1) moUp.push(r.target);
       }
@@ -594,7 +618,7 @@
     document.addEventListener('yt-navigate-finish', checkRoute, true);
     if (!BRIDGE) window.setInterval(checkRoute, POLL_MS);
     // href / is-shorts / title: YouTube recycles renderers and rewrites them in place.
-    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'is-shorts', 'title'] });
+    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'is-shorts', 'title'].concat(MO_FLAGS) });
     new MutationObserver(applyAttrs).observe(root, {
       attributes: true, attributeFilter: ['data-reelfree', 'data-rfy-mode', 'data-rfy-shorts']
     });

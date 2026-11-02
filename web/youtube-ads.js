@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '0.1.0';
+  var VERSION = '0.1.1';
   var AD_KEYS = ['adPlacements', 'playerAds', 'adSlots'];
   var PLAYER_PATH_RE = /^\/youtubei\/v1\/player(?:\/|$)/;
 
@@ -57,7 +57,8 @@
     }
   }
 
-  if (typeof module === 'object' && module && module.exports) {
+  // Node tests only: never write to a page-defined `module` global in the page world (G4).
+  if (typeof window === 'undefined' && typeof module === 'object' && module && module.exports) {
     module.exports = { prune: prune, hostAllowed: hostAllowed, AD_KEYS: AD_KEYS, VERSION: VERSION };
   }
   if (typeof document === 'undefined' || typeof window === 'undefined') return;
@@ -90,14 +91,20 @@
     var wrapped = function (input, init) {
       var p = origFetch.apply(this, arguments);
       if (!isPlayerUrl(input)) return p;
+      // Any failure after the page's own request succeeded hands back the original res (G1):
+      // a rejection here would break the player. A failure of the request itself still rejects.
       return p.then(function (res) {
         try {
           if (!res || !res.ok) return res;
           return res.clone().json().then(function (data) {
-            if (!prune(data)) return res;
-            return new window.Response(JSON.stringify(data), {
-              status: res.status, statusText: res.statusText, headers: res.headers
-            });
+            try {
+              if (!prune(data)) return res;
+              return new window.Response(JSON.stringify(data), {
+                status: res.status, statusText: res.statusText, headers: res.headers
+              });
+            } catch (e) {
+              return res;
+            }
           }, function () { return res; });
         } catch (e) {
           return res;

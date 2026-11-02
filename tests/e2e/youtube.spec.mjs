@@ -204,6 +204,23 @@ test.describe('D01 perf — app mode', () => {
   });
 });
 
+test.describe('G2 — flags stripped by the page', () => {
+  test.use({ preInit: [fakeApp({})] });
+
+  test('a Short item whose data-reelfree-shorts is removed by the page stays hidden', async ({ page }) => {
+    await open(page, '/');
+    await page.evaluate(() => {
+      document.getElementById('home-grid').insertAdjacentHTML('beforeend',
+        '<ytm-rich-item-renderer id="g2-short"><a href="/shorts/GGGGGGGGGGG">s</a></ytm-rich-item-renderer>');
+    });
+    await page.waitForTimeout(150);
+    expect(await shown(page, '#g2-short')).toBe(false);
+    await page.evaluate(() => document.getElementById('g2-short').removeAttribute('data-reelfree-shorts'));
+    await page.waitForTimeout(150);
+    expect(await shown(page, '#g2-short')).toBe(false);
+  });
+});
+
 test.describe('D01 perf — standalone (control)', () => {
   test.use({ preInit: ['window.__rfIntervals = 0; { const si = window.setInterval; window.setInterval = function () { window.__rfIntervals++; return si.apply(window, arguments); }; }'] });
 

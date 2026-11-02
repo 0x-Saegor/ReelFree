@@ -72,6 +72,38 @@ test.describe('youtube-ads.js — prune', () => {
     expect(r).toEqual({ status: 200, ok: true, keys: ['playabilityStatus', 'videoDetails'] });
   });
 
+  test('G1: a failure while rebuilding the response resolves to the original res, never rejects', async ({ page }) => {
+    await open(page);
+    const r = await page.evaluate(async () => {
+      const out = {};
+      const OrigResponse = window.Response, origStringify = JSON.stringify;
+      // 1. Response constructor throws.
+      window.Response = function () { throw new TypeError('boom'); };
+      try {
+        const res = await fetch('/youtubei/v1/player', { method: 'POST', body: '{}' });
+        out.ctor = { ok: res.ok, keys: Object.keys(await res.json()).sort() };
+      } catch (e) { out.ctor = 'rejected:' + e.name; }
+      window.Response = OrigResponse;
+      // 2. JSON.stringify throws.
+      JSON.stringify = function () { throw new RangeError('boom'); };
+      try {
+        const res = await fetch('/youtubei/v1/player', { method: 'POST', body: '{}' });
+        out.stringify = { ok: res.ok, keys: Object.keys(await res.json()).sort() };
+      } catch (e) { out.stringify = 'rejected:' + e.name; }
+      JSON.stringify = origStringify;
+      return out;
+    });
+    const orig = { ok: true, keys: ['adPlacements', 'adSlots', 'playabilityStatus', 'playerAds', 'videoDetails'] };
+    expect(r).toEqual({ ctor: orig, stringify: orig });
+  });
+
+  test('G1: a failed request still rejects (no fake response invented)', async ({ page }) => {
+    await open(page);
+    await page.route('**/youtubei/v1/player/fail', (route) => route.abort('failed'));
+    const r = await page.evaluate(() => fetch('/youtubei/v1/player/fail').then(() => 'resolved', (e) => 'rejected:' + e.name));
+    expect(r).toBe('rejected:TypeError');
+  });
+
   test('other endpoints are untouched', async ({ page }) => {
     await open(page);
     const keys = await page.evaluate(async () => Object.keys(await (await fetch('/youtubei/v1/browse')).json()).sort());
@@ -132,12 +164,52 @@ test.describe('youtube.js — ad fallback (isolated world)', () => {
     expect(await shown(page, '#late-ad')).toBe(true);
   });
 
+  // G3 helper: fake media timing on #vid, record seeks and Skip clicks.
+  const rig = (page, duration, withUi) => page.evaluate(([duration, withUi]) => {
+    const v = document.getElementById('vid');
+    window.__seek = [];
+    Object.defineProperty(v, 'duration', { configurable: true, get: () => duration });
+    Object.defineProperty(v, 'currentTime', { configurable: true, get: () => 2, set: (t) => window.__seek.push(t) });
+    v.muted = false;
+    window.__skips = 0;
+    document.getElementById('skip').addEventListener('click', () => { window.__skips++; });
+    if (withUi) {
+      const ui = document.createElement('div');
+      ui.className = 'ytp-ad-player-overlay';
+      document.getElementById('movie_player').appendChild(ui);
+    }
+    document.getElementById('movie_player').classList.add('ad-showing');
+  }, [duration, withUi]);
+  const adState = (page) => page.evaluate(() =>
+    ({ muted: document.getElementById('vid').muted, seek: window.__seek, skips: window.__skips }));
+
+  test('G3: .ad-showing with the ad UI on a long ad: acted on', async ({ page }) => {
+    await open(page);
+    await rig(page, 120, true);
+    await page.waitForTimeout(100);
+    const st = await adState(page);   // the inserted UI node can trigger a second, idempotent pass
+    expect(st.muted).toBe(true);
+    expect(st.seek.length && st.seek.every((t) => t === 120)).toBeTruthy();
+    expect(st.skips).toBeGreaterThanOrEqual(1);
+  });
+
+  test('G3: stale .ad-showing on a long video without ad UI: nothing touched', async ({ page }) => {
+    await open(page);
+    await rig(page, 600, false);
+    await page.waitForTimeout(100);
+    expect(await adState(page)).toEqual({ muted: false, seek: [], skips: 0 });
+    // Class removed later: the user's sound state is left alone.
+    await page.evaluate(() => document.getElementById('movie_player').classList.remove('ad-showing'));
+    await page.waitForTimeout(100);
+    expect(await page.evaluate(() => document.getElementById('vid').muted)).toBe(false);
+  });
+
   test('.ad-showing: muted, seeked to the end, Skip pressed; sound restored afterwards', async ({ page }) => {
     await open(page);
     await page.evaluate(() => {
       const v = document.getElementById('vid');
       window.__seek = [];
-      Object.defineProperty(v, 'duration', { configurable: true, get: () => 15 });
+      Object.defineProperty(v, 'duration', { configurable: true, get: () => 15 });   // short: an ad (G3)
       Object.defineProperty(v, 'currentTime', { configurable: true, get: () => 2, set: (t) => window.__seek.push(t) });
       v.muted = false;
       window.__skips = 0;

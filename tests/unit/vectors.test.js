@@ -1,7 +1,7 @@
 'use strict';
 // Runs the shared route-policy vectors (tests/vectors/policy.json, docs/SPEC-iOS.md) against
 // web/instagram.js decide(). RoutePolicy.swift runs the very same file in XCTest.
-// ctx: {token: {id, ageMs}, lastThread, activeReel, config}; expect: only the keys present are compared.
+// ctx: {token: {id, ageMs}, lastThread, activeReel, config, via}; expect: only the keys present are compared.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -18,7 +18,8 @@ const vectors = JSON.parse(fs.readFileSync(FILE, 'utf8'));
 function toDecideCtx(c) {
   return {
     now: NOW,
-    token: c.token ? { id: c.token.id, ts: NOW - c.token.ageMs } : null,
+    // via: "popstate" (Avenants 2, 4): history traversal spends the token, never admits with it.
+    token: c.token && c.via !== 'popstate' ? { id: c.token.id, ts: NOW - c.token.ageMs } : null,
     lastThread: 'lastThread' in c ? c.lastThread : null,
     activeReel: 'activeReel' in c ? c.activeReel : null,
     config: c.config,

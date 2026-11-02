@@ -24,7 +24,7 @@
     feedVariant: 'following'   // 'following' (only accounts you follow) | 'default' ("Pour vous", mostly suggestions)
   };
 
-  var VERSION = '0.3.0';
+  var VERSION = '0.3.1';
   var TOKEN_KEY = 'reelfree:dm-allow';   // value: "<reelId>:<createdAtMs>"
   var POLL_MS = 250;
   var DM_TAP_WINDOW_MS = 1500;   // D2 fallback: a tap-driven navigation happens within a few hundred ms
@@ -363,12 +363,12 @@
       return memToken;
     }
     try {
-      var v = window.sessionStorage.getItem(TOKEN_KEY);
+      var v = window.sessionStorage.getItem('reelfree:dm-allow');
       if (!v) return null;
       var m = /^([A-Za-z0-9_-]{1,64}):(\d{1,16})$/.exec(v);
-      if (!m) { window.sessionStorage.removeItem(TOKEN_KEY); return null; }
+      if (!m) { window.sessionStorage.removeItem('reelfree:dm-allow'); return null; }
       var ts = Number(m[2]);
-      if (Date.now() - ts > CONFIG.dmReelTtlMs) { window.sessionStorage.removeItem(TOKEN_KEY); return null; }
+      if (Date.now() - ts > CONFIG.dmReelTtlMs) { window.sessionStorage.removeItem('reelfree:dm-allow'); return null; }
       return { id: m[1], ts: ts };
     } catch (e) {
       return null;
@@ -377,19 +377,27 @@
 
   function writeToken(id) {
     if (BRIDGE) { memToken = { id: id, ts: Date.now() }; return; }
-    try { window.sessionStorage.setItem(TOKEN_KEY, id + ':' + Date.now()); } catch (e) { /* ignore */ }
+    try { window.sessionStorage.setItem('reelfree:dm-allow', id + ':' + Date.now()); } catch (e) { /* ignore */ }
   }
 
   // Flags (F6, B05 review): in the app nothing is written to web storage; flags live in this
   // document's memory (lost on a full reload). Standalone: sessionStorage, "reelfree:" keys only.
+  // G5: the standalone storage calls take a literal key each (checked by bin/verify); any other
+  // key throws, and every caller treats a throw as "no storage".
   var memFlags = Object.create(null);
   function flagGet(key) {
     if (BRIDGE) return Object.prototype.hasOwnProperty.call(memFlags, key) ? memFlags[key] : null;
-    return window.sessionStorage.getItem(key);
+    if (key === 'reelfree:feed-variant-at') return window.sessionStorage.getItem('reelfree:feed-variant-at');
+    if (key === 'reelfree:feed-count') return window.sessionStorage.getItem('reelfree:feed-count');
+    if (key === 'reelfree:feed-seen') return window.sessionStorage.getItem('reelfree:feed-seen');
+    throw new Error('flag key');
   }
   function flagSet(key, value) {
     if (BRIDGE) { memFlags[key] = value; return; }
-    window.sessionStorage.setItem(key, value);
+    if (key === 'reelfree:feed-variant-at') window.sessionStorage.setItem('reelfree:feed-variant-at', value);
+    else if (key === 'reelfree:feed-count') window.sessionStorage.setItem('reelfree:feed-count', value);
+    else if (key === 'reelfree:feed-seen') window.sessionStorage.setItem('reelfree:feed-seen', value);
+    else throw new Error('flag key');
   }
 
   var VARIANT_KEY = 'reelfree:feed-variant-at';
@@ -424,7 +432,7 @@
   function clearToken() {
     memToken = null;
     if (BRIDGE) return;
-    try { window.sessionStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ }
+    try { window.sessionStorage.removeItem('reelfree:dm-allow'); } catch (e) { /* ignore */ }
   }
 
   // D2: a tap/click on a media inside a thread. Local token (second line) + request to the app.
@@ -899,6 +907,11 @@
   var moFull = false;
   var moScheduled = false;
   var moTimer = 0;
+  // Hiding flags set by this script (G2): the page stripping one from a recycled node re-checks it.
+  var MO_FLAGS = ['data-reelfree-reel', 'data-reelfree-ad', 'data-reelfree-sugg', 'data-reelfree-cap',
+    'data-reelfree-last', 'data-reelfree-nav', 'data-reelfree-caughtup'];
+  var MO_FLAG_SET = {};
+  for (var fi = 0; fi < MO_FLAGS.length; fi++) MO_FLAG_SET[MO_FLAGS[fi]] = true;
   function flushMutations() {
     if (!moScheduled) return;
     moScheduled = false;
@@ -913,8 +926,11 @@
   var observer = new MutationObserver(function (records) {
     for (var i = 0; i < records.length && !moFull; i++) {
       var r = records[i];
-      if (r.type === 'attributes') moQueue.push(r.target);
-      else {
+      if (r.type === 'attributes') {
+        // G2: our own flags are watched too, but only a removal (by the page, or by us when the
+        // condition ends) re-checks the node; setting a flag never re-queues it, so this converges.
+        if (!MO_FLAG_SET[r.attributeName] || !r.target.hasAttribute(r.attributeName)) moQueue.push(r.target);
+      } else {
         for (var j = 0; j < r.addedNodes.length; j++) if (r.addedNodes[j].nodeType === 1) moQueue.push(r.addedNodes[j]);
         if (r.removedNodes.length && r.target.nodeType === 1) moUp.push(r.target);
       }
@@ -965,7 +981,7 @@
     // Standalone (Userscripts app) only: in the app, routes come from onNative {type: "route"}.
     if (!BRIDGE) window.setInterval(checkRoute, POLL_MS);
     // href: React recycles nodes and rewrites links in place.
-    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['href'] });
+    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['href'].concat(MO_FLAGS) });
     // Separate, synchronous guard on our own <html> attributes: restore immediately if the page strips them.
     new MutationObserver(applyAttrs).observe(root, { attributes: true, attributeFilter: ['data-reelfree', 'data-rf-mode'] });
     post({ type: 'ready', script: 'instagram', version: VERSION });

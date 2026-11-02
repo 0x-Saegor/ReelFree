@@ -84,6 +84,17 @@ const CASES = [
   ['D2 same reel re-evaluated (activeReel)', `/reel/${ID}/`, { activeReel: ID, lastThread: T }, { action: 'allow' }],
   ['D2 same /p/ re-evaluated (activeReel)', `/p/${ID}/`, { activeReel: ID, lastThread: T }, { action: 'allow' }],
 
+  // Avenants 2 et 4: history traversal (ctx.via = "popstate") spends any pending token without
+  // admitting a media. Ports drop ctx.token before deciding (see toDecideCtx).
+  ['P popstate reel with valid token', `/reel/${ID}/`, { ...tok(ID, 1000), via: 'popstate' }, { action: 'redirect', to: '/' }],
+  ['P popstate reel with valid token returns to lastThread', `/reel/${ID}/`, { ...tok(ID, 1000), lastThread: T, via: 'popstate' }, { action: 'redirect', to: T }],
+  ['P popstate reels/<id> with valid token', `/reels/${ID}/`, { ...tok(ID, 1000), lastThread: T, via: 'popstate' }, { action: 'redirect', to: T }],
+  ['P popstate profile reel with valid token', `/someuser/reel/${ID}/`, { ...tok(ID, 1000), via: 'popstate' }, { action: 'redirect', to: '/' }],
+  ['P popstate tv/<id> with valid token', `/tv/${ID}/`, { ...tok(ID, 1000), via: 'popstate' }, { action: 'redirect', to: '/' }],
+  ['P popstate /p/ with valid token: plain post, no reel admitted', `/p/${ID}/`, { ...tok(ID, 1000), lastThread: T, via: 'popstate' }, { action: 'allow' }],
+  ['P popstate to the thread', T, { ...tok(ID, 1000), via: 'popstate' }, { action: 'allow' }],
+  ['P popstate reel without token', `/reel/${ID}/`, { via: 'popstate' }, { action: 'redirect', to: '/' }],
+
   // D3: no chaining from an admitted reel.
   ['D3 token for A, navigation to reel B', `/reel/${ID2}/`, { ...tok(ID, 1000), lastThread: T }, { action: 'redirect', to: T }],
   ['D3 token for A, navigation to reels/B', `/reels/${ID2}/`, { ...tok(ID, 1000), lastThread: T }, { action: 'redirect', to: T }],
@@ -120,7 +131,7 @@ const CASES = [
 
 function toDecideCtx(c) {
   const out = { now: NOW, token: null, lastThread: null, activeReel: null };
-  if (c.token) out.token = { id: c.token.id, ts: NOW - c.token.ageMs };
+  if (c.token && c.via !== 'popstate') out.token = { id: c.token.id, ts: NOW - c.token.ageMs };
   if ('lastThread' in c) out.lastThread = c.lastThread;
   if ('activeReel' in c) out.activeReel = c.activeReel;
   if (c.config) out.config = c.config;

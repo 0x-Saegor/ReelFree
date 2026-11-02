@@ -53,3 +53,12 @@ test('static: no bridge, no storage, no cookies, no dynamic code, no HTML sinks,
   // fetch is only called as origFetch.apply (the page's own request, passed through).
   assert.deepStrictEqual(CODE.match(/fetch\s*\(/g), null);
 });
+
+test('G4: in the page world a page-defined `module` global is never written', () => {
+  const vm = require('node:vm');
+  const mod = { exports: {} };
+  const ctx = { module: mod, window: { location: { hostname: 'example.com', href: 'https://example.com/' } },
+    document: {}, URL };
+  vm.runInNewContext(SRC, ctx);
+  assert.deepStrictEqual(Object.keys(mod.exports), []);
+});
