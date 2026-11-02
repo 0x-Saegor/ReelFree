@@ -1,0 +1,572 @@
+#!/usr/bin/env bash
+# ReelFree — bin/verify
+# Static security gate for the iOS app (rf-ops, B04): injected JS (web/) + Swift app (ios/)
+# + secrets in the repository. Run by CI (ci.yml) before any build; a FAIL blocks TestFlight.
+#
+# Usage:
+#   bin/verify               # everything: web/*.js, ios/, secrets
+#   bin/verify --js          # web/*.js only
+#   bin/verify --swift       # ios/ only (+ secrets)
+#   bin/verify FILE.js       # one injected script (named instagram.js or youtube.js)
+#   bin/verify --selftest    # every rule must catch a known-bad sample, clean samples must pass
+#
+# Last line is exactly one of:
+#   OK instagram=<12 hex> youtube=<12 hex> swift=<n files>   (fields depend on the mode)
+#   FAIL <reason>
+# Exit code: 0 = OK, 1 = forbidden API / config, 2 = usage or I/O error.
+#
+# The scan is deliberately raw: comments and strings are scanned too, so that a forbidden
+# call cannot hide behind a fake comment delimiter. Do not name forbidden APIs in comments
+# of web/ or ios/ (write "network call" rather than the API name).
+#
+# RF_VERIFY_ROOT overrides the repository root (used by --selftest only).
+set -u
+export LC_ALL=C.UTF-8
+
+ROOT=${RF_VERIFY_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+fail() { printf 'FAIL %s\n' "$1"; exit "${2:-1}"; }
+
+# Domains allowed in WKAppBoundDomains (docs/SPEC-iOS.md, at most 10 entries).
+APP_BOUND='instagram.com www.instagram.com cdninstagram.com fbcdn.net youtube.com m.youtube.com www.youtube.com ytimg.com googlevideo.com'
+# Modules the app may import. Anything else is a third-party dependency.
+SWIFT_IMPORTS='SwiftUI UIKit WebKit Foundation Combine os OSLog XCTest Observation'
+
+# ==========================================================================
+# 1. Injected JavaScript (one file)
+# ==========================================================================
+read -r -d '' JS_SCAN <<'PERL'
+use strict; use warnings;
+my $file = shift;
+open(my $fh, "<:encoding(UTF-8)", $file) or do { print "ERR cannot open\n"; exit 2 };
+my @lines = <$fh>; close $fh;
+my %allowed_host = map { $_ => 1 } split / /, $ENV{HOSTS};
+my @findings;
+sub hit { my ($n, $rule, $txt) = @_; $txt =~ s/^\s+|\s+$//g; $txt = substr($txt, 0, 120);
+          push @findings, sprintf("L%-5s %-22s %s", $n, $rule, $txt); }
+
+# The only bridge call allowed (docs/SPEC-iOS.md): the "reelfree" handler, spelled out.
+my $BRIDGE = qr/window\s*\.\s*webkit\s*\.\s*messageHandlers\s*\.\s*reelfree\s*\.\s*postMessage\s*\(/;
+
+my @rules = (
+  # network
+  [ "net:fetch",          qr/\bfetch\b/ ],
+  [ "net:xhr",            qr/XMLHttpRequest/ ],
+  [ "net:websocket",      qr/WebSocket/ ],
+  [ "net:eventsource",    qr/EventSource/ ],
+  [ "net:beacon",         qr/sendBeacon/ ],
+  [ "net:webrtc",         qr/RTCPeerConnection|RTCDataChannel/ ],
+  [ "net:worker",         qr/\b(?:Shared)?Worker\s*\(|serviceWorker|importScripts/ ],
+  [ "net:postmessage",    qr/postMessage/ ],                       # bridge call removed first
+  [ "bridge:handler",     qr/messageHandlers\s*(?:\[|\.\s*(?!reelfree\b)[\w\$])/ ],
+  [ "net:window.open",    qr/\bwindow\s*\.\s*open\b|\bopen\s*\(\s*[\x27"`]/ ],
+  [ "net:form",           qr/\.\s*submit\s*\(|requestSubmit|formAction|\.\s*action\s*=(?!=)/ ],
+  [ "net:resource-elem",  qr/createElement(?:NS)?\s*\(\s*(?:[^,)]*,\s*)?[\x27"`]\s*(?:script|img|image|iframe|frame|link|object|embed|audio|video|source|track|form|base|meta|svg|use|picture)\b/i ],
+  [ "net:src-assign",     qr/\.\s*(?:src|srcset|data|poster|background)\s*=(?!=)|setAttribute\s*\(\s*[\x27"`](?:src|srcset|href|xlink:href|data|poster|action|formaction|style)[\x27"`]/i ],
+  [ "net:css-url",        qr/(?<!new )(?<![\w.])url\s*\(|\@import/i ],
+  # dynamic code
+  [ "code:eval",          qr/\beval\b/ ],
+  [ "code:Function",      qr/\bFunction\s*\(/ ],
+  [ "code:constructor",   qr/\.\s*constructor\s*\(|\[\s*[\x27"`]constructor/ ],
+  [ "code:timer-string",  qr/\bset(?:Timeout|Interval|Immediate)\s*\(\s*[\x27"`]/ ],
+  [ "code:import",        qr/\bimport\s*\(|\bimport\s+[\w{*]|\brequire\s*\(/ ],
+  [ "code:html-sink",     qr/innerHTML|outerHTML|insertAdjacentHTML|document\s*\.\s*write|createContextualFragment|DOMParser|srcdoc|setHTML(?:Unsafe)?\b|parseHTMLUnsafe/ ],
+  [ "code:obfuscation",   qr/\batob\b|\bbtoa\b|fromCharCode|fromCodePoint|\\x[0-9a-fA-F]{2}|\bunescape\b|decodeURIComponent\s*\(\s*[\x27"`]%/ ],
+  [ "code:dynamic-global",qr/\b(?:window|globalThis|self|top|parent|document|navigator|webkit)\s*\[/ ],
+  [ "code:userscript-api",qr/\bGM[_.]|unsafeWindow|\b(?:browser|chrome)\s*\.\s*(?:runtime|storage|tabs|extension|scripting|webRequest)\b/ ],
+  # persistence / identity
+  [ "store:localStorage", qr/localStorage/ ],
+  [ "store:indexedDB",    qr/indexedDB|openDatabase|\bcaches\b|CacheStorage/ ],
+  [ "store:cookie",       qr/\.\s*cookie\b|cookieStore/ ],
+  [ "store:ss-bulk",      qr/sessionStorage\s*(?:\[|\.\s*(?:clear|key|length)\b)/ ],
+  [ "read:clipboard",     qr/clipboard|execCommand/ ],
+);
+for my $i (0 .. $#lines) {
+  my $l = $lines[$i]; my $n = $i + 1;
+  (my $c = $l) =~ s/$BRIDGE//g;
+  for my $r (@rules) { hit($n, $r->[0], $l) if $c =~ $r->[1]; }
+
+  # sessionStorage keys must be string literals starting with "reelfree:" (or an
+  # identifier, reported as a warning below for manual review).
+  while ($l =~ /sessionStorage\s*\.\s*(?:getItem|setItem|removeItem)\s*\(\s*([^,)]*)/g) {
+    my $k = $1; $k =~ s/\s+$//;
+    if ($k =~ /^[\x27"`]/) { hit($n, "store:ss-key", $l) unless $k =~ /^[\x27"`]reelfree:/; }
+  }
+  # absolute / protocol-relative URLs to hosts other than the allowed ones
+  while ($l =~ m{(?:\b[a-z][a-z0-9+.-]*:)?//([A-Za-z0-9.-]+)}g) {
+    my $host = lc $1; my $full = $&;
+    next if $full !~ /^(?:https?:|wss?:|ftp:)?\/\// ;
+    next if $full =~ /^\/\// && $l !~ /[\x27"`]\/\/\Q$host\E/i;  # a // comment, not a URL literal
+    hit($n, "net:foreign-url", $l) unless $allowed_host{$host};
+  }
+  hit($n, "text:invisible-char", "(bidi or zero-width character)")
+    if $l =~ /[\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{2064}\x{2066}-\x{2069}\x{FEFF}\x{00AD}]/;
+  hit($n, "text:long-line", length($l) . " chars") if length($l) > 400;
+}
+
+# The app injects the file as is: a userscript header is dead weight (rf-web A02 removes it).
+for my $i (0 .. $#lines) {
+  if ($lines[$i] =~ m{^\s*//\s*==UserScript==}) {
+    printf("WARN L%-5s userscript header still present (ignored by the app)\n", $i + 1); last;
+  }
+}
+for my $i (0 .. $#lines) {
+  while ($lines[$i] =~ /sessionStorage\s*\.\s*(?:getItem|setItem|removeItem)\s*\(\s*([^,)]*)/g) {
+    my $k = $1;
+    printf("WARN L%-5s sessionStorage key is not a literal, check it is reelfree:-prefixed: %s\n", $i + 1, $k)
+      unless $k =~ /^\s*[\x27"`]/;
+  }
+}
+print "$_\n" for @findings;
+print "FINDINGS " . scalar(@findings) . "\n";
+exit(@findings ? 1 : 0);
+PERL
+
+# verify_js FILE -> prints details, returns 0/1/2. Last line OK sha256=.. or FAIL.
+verify_js() {
+  local f=$1 hosts sha
+  [ -f "$f" ] && [ -r "$f" ] || { printf 'FAIL file not readable: %s\n' "$f"; return 2; }
+  case $(basename "$f") in
+    instagram.js) hosts='www.instagram.com' ;;
+    youtube.js)   hosts='m.youtube.com www.youtube.com' ;;
+    *) printf 'FAIL unknown script name: %s (expected instagram.js or youtube.js)\n' "$(basename "$f")"; return 2 ;;
+  esac
+  sha=$(sha256sum -- "$f" | cut -d' ' -f1) || { printf 'FAIL sha256sum failed\n'; return 2; }
+  # A script that does not parse never runs: nothing is hidden (fail-open). Blocking.
+  if command -v node >/dev/null 2>&1; then
+    local synerr
+    synerr=$(node --check -- "$f" 2>&1) || {
+      printf '%s\n' "$synerr" | head -5
+      printf 'FAIL syntax error in %s (script would not run: fail-open)\n' "$(basename "$f")"; return 1; }
+  else
+    printf 'WARN node not found: syntax check skipped\n'
+  fi
+  printf 'sha256 %s\n' "$sha"
+  HOSTS="$hosts" perl -CSD -e "$JS_SCAN" "$f"
+  case $? in
+    0) printf 'OK sha256=%s\n' "${sha:0:12}"; return 0 ;;
+    1) printf 'FAIL forbidden API in %s (see findings above)\n' "$(basename "$f")"; return 1 ;;
+    *) printf 'FAIL scanner error\n'; return 2 ;;
+  esac
+}
+
+# ==========================================================================
+# 2. Swift app (ios/): sources, project.yml, Info.plist, privacy manifest
+# ==========================================================================
+read -r -d '' SWIFT_SCAN <<'PERL'
+use strict; use warnings; use File::Find;
+my $root = shift; my $ios = "$root/ios";
+my %bound_ok = map { $_ => 1 } split / /, $ENV{APP_BOUND};
+my %import_ok = map { $_ => 1 } split / /, $ENV{SWIFT_IMPORTS};
+my @findings;
+sub rel { my $p = shift; $p =~ s{^\Q$root\E/}{}; $p }
+sub hit { my ($f, $n, $rule, $txt) = @_; $txt //= ""; $txt =~ s/^\s+|\s+$//g; $txt = substr($txt, 0, 110);
+          push @findings, sprintf("%s:%s  %-24s %s", rel($f), $n, $rule, $txt); }
+sub slurp { my $p = shift; open(my $fh, "<:encoding(UTF-8)", $p) or return undef; local $/; my $s = <$fh>; close $fh; $s }
+
+unless (-d $ios) { print "FINDINGS 1\nios/ not found\n"; exit 1; }
+
+my (@swift, @plist, @privacy, @yml);
+find({ no_chdir => 1, wanted => sub {
+  my $p = $File::Find::name; my $b = $_; $b =~ s{.*/}{};
+  if (-d $p) {
+    if ($b =~ /^(?:Pods|Carthage|\.swiftpm|SourcePackages)$/) { hit($p, 0, "dep:third-party-dir", $b); $File::Find::prune = 1; return; }
+    if ($b =~ /\.(?:xcframework|framework|bundle)$/)        { hit($p, 0, "dep:binary-framework", $b); $File::Find::prune = 1; return; }
+    $File::Find::prune = 1 if $b =~ /^(?:build|DerivedData|\.build)$|\.(?:xcodeproj|xcworkspace|xcarchive)$/;
+    return;
+  }
+  if    ($b =~ /\.swift$/ && $b ne "Package.swift") { push @swift, $p }
+  elsif ($b eq "PrivacyInfo.xcprivacy")            { push @privacy, $p }
+  elsif ($b =~ /\.(?:plist|entitlements)$/)        { push @plist, $p }
+  elsif ($b =~ /\.ya?ml$/)                         { push @yml, $p }
+  if ($b =~ /^(?:Package\.swift|Package\.resolved|Podfile(?:\.lock)?|Cartfile(?:\.resolved)?)$/) { hit($p, 0, "dep:manager", $b) }
+  if ($b =~ /\.(?:a|dylib|o)$/) { hit($p, 0, "dep:binary", $b) }
+}}, $ios);
+
+# --- Swift sources ---------------------------------------------------------
+my @rules = (
+  [ "net:url-loading",     qr/\bURLSession\w*|\bNSURLSession|\bNSURLConnection|\bCFNetwork|\bCFHTTP\w*|\bCFStream\w*|\bNW(?:Connection|Listener|Browser|Endpoint|Parameters)\b|getStreamsToHost/ ],
+  [ "net:remote-contents", qr/contentsOf\s*:\s*URL\s*\(\s*string\s*:/ ],
+  [ "net:tls-bypass",      qr/didReceive\s+challenge|URLAuthenticationChallenge|serverTrust|URLCredential\s*\(\s*trust/ ],
+  [ "sdk:tracking",        qr/\b(?:Firebase\w*|Crashlytics|Sentry\w*|Mixpanel|Amplitude|TelemetryDeck|Bugsnag|AppsFlyer|OneSignal|FBSDK\w*|GoogleMobileAds|ASIdentifierManager|advertisingIdentifier|identifierForVendor|ATTrackingManager|SKAdNetwork)\b/ ],
+  [ "webview:app-bound-off", qr/limitsNavigationsToAppBoundDomains\s*=\s*false/ ],
+  [ "webview:page-world",  qr/WKContentWorld\s*\.\s*page\b|\b(?:in|contentWorld)\s*:\s*\.page\b/ ],
+  [ "webview:popups",      qr/javaScriptCanOpenWindowsAutomatically\s*=\s*true/ ],
+  [ "webview:link-preview",qr/allowsLinkPreview\s*=\s*true/ ],
+  [ "data:cookies",        qr/httpCookieStore|HTTPCookieStorage|\bHTTPCookie\b|getAllCookies|WKHTTPCookieStore/ ],
+  [ "data:clipboard",      qr/UIPasteboard/ ],
+  [ "data:keychain",       qr/\bSecItem(?:Add|Update|CopyMatching)\b/ ],
+  [ "code:dynamic",        qr/\bdlopen\b|\bdlsym\b|NSClassFromString|NSSelectorFromString/ ],
+);
+my %src_text; my $bound_on = 0;
+for my $f (@swift) {
+  my $s = slurp($f); defined $s or do { hit($f, 0, "io:unreadable"); next };
+  my @L = split /\n/, $s, -1;
+  $bound_on = 1 if $s =~ /limitsNavigationsToAppBoundDomains\s*=\s*true/;
+  for my $i (0 .. $#L) {
+    my $l = $L[$i]; my $n = $i + 1;
+    for my $r (@rules) { hit($f, $n, $r->[0], $l) if $l =~ $r->[1]; }
+    if ($l =~ /^\s*(?:\@\w+\s+)*import\s+(?:(?:struct|class|enum|protocol|func|var|let|typealias)\s+)?(\w+)/) {
+      my $m = $1; hit($f, $n, "dep:import", $l) unless $import_ok{$m} || $m =~ /^ReelFree\w*$/;
+    }
+    hit($f, $n, "text:invisible-char", "(bidi or zero-width character)")
+      if $l =~ /[\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{2064}\x{2066}-\x{2069}\x{FEFF}\x{00AD}]/;
+    # Multi-line calls: look at this line and the next 4.
+    my $w = join(" ", @L[$i .. ($i + 4 > $#L ? $#L : $i + 4)]);
+    if ($l =~ /\b(?:evaluateJavaScript|callAsyncJavaScript)\s*\(/) {
+      hit($f, $n, "webview:js-world", "JS must run in .defaultClient: $l") unless $w =~ /\bin\s*:\s*(?:WKContentWorld)?\s*\.defaultClient\b/;
+    }
+    if ($l =~ /\bWKUserScript\s*\(/) {
+      hit($f, $n, "webview:script-world", "WKUserScript needs in: .defaultClient: $l") unless $w =~ /\bin\s*:\s*(?:WKContentWorld)?\s*\.defaultClient\b/;
+      hit($f, $n, "webview:script-frames", "WKUserScript needs forMainFrameOnly: true: $l") unless $w =~ /forMainFrameOnly\s*:\s*true/;
+    }
+    if ($l =~ /\b(?:add|addScriptMessageHandler)\s*\(/ && $w =~ /\bname\s*:/) {
+      hit($f, $n, "webview:handler-world", "message handler needs contentWorld: .defaultClient: $l")
+        unless $w =~ /contentWorld\s*:\s*(?:WKContentWorld)?\s*\.defaultClient\b/;
+    }
+  }
+}
+hit($ios, 0, "swift:none", "no Swift source in ios/") unless @swift;
+hit($ios, 0, "webview:app-bound-missing", "no 'limitsNavigationsToAppBoundDomains = true' in ios/") if @swift && !$bound_on;
+
+# --- Info.plist / entitlements / project.yml --------------------------------
+my $ATS = qr/NSAppTransportSecurity|NSAllowsArbitraryLoads\w*|NSExceptionDomains|NSAllowsLocalNetworking|NSExceptionAllowsInsecureHTTPLoads|NSTemporaryException\w*/;
+my @domains; my $domains_src = 0;
+for my $f (@plist) {
+  my $s = slurp($f); defined $s or next;
+  my @L = split /\n/, $s, -1;
+  for my $i (0 .. $#L) { hit($f, $i + 1, "plist:ats-exception", $L[$i]) if $L[$i] =~ $ATS; }
+  if ($s =~ m{<key>\s*WKAppBoundDomains\s*</key>\s*<array>(.*?)</array>}s) {
+    my @d = ($1 =~ m{<string>\s*([^<]*?)\s*</string>}g); $domains_src++;
+    hit($f, 0, "plist:app-bound-empty", "WKAppBoundDomains is empty") unless @d;
+    push @domains, map { [$f, $_] } @d;
+  }
+  if ($f =~ /\.entitlements$/) { while ($s =~ m{<key>\s*([^<]+?)\s*</key>}g) { print "WARN entitlement in " . rel($f) . ": $1\n" } }
+}
+for my $f (@yml) {
+  my $s = slurp($f); defined $s or next;
+  my @L = split /\n/, $s, -1;
+  for my $i (0 .. $#L) {
+    my $l = $L[$i]; my $n = $i + 1;
+    hit($f, $n, "plist:ats-exception", $l)  if $l =~ $ATS;
+    hit($f, $n, "dep:spm-package", $l)      if $l =~ /^\s*packages\s*:/;
+    hit($f, $n, "dep:external", $l)         if $l =~ /^\s*-?\s*(?:package|framework|carthage|bundle)\s*:/;
+    hit($f, $n, "build:download", $l)       if $l =~ /\b(?:curl|wget|git\s+clone|pip\s+install|npm\s+install|brew\s+install)\b/;
+    if ($l =~ /^(\s*)WKAppBoundDomains\s*:\s*(.*?)\s*$/) {
+      my ($ind, $inline) = (length $1, $2); $domains_src++; my $before = @domains;
+      if ($inline =~ /^\[(.*)\]$/) { push @domains, map { my $d = $_; $d =~ s/^\s*[\x27"]?|[\x27"]?\s*$//g; [$f, $d] } split /,/, $1; }
+      elsif ($inline ne "" && $inline !~ /^#/) { hit($f, $n, "plist:app-bound-format", "use a YAML list: $l") }
+      else {
+        for my $j ($i + 1 .. $#L) {
+          next if $L[$j] =~ /^\s*(?:#.*)?$/;
+          last unless $L[$j] =~ /^(\s*)-\s*[\x27"]?([^\x27"\s#]+)/ && length($1) >= $ind;
+          push @domains, [$f, $2];
+        }
+      }
+      hit($f, $n, "plist:app-bound-empty", "WKAppBoundDomains is empty") if @domains == $before;
+    }
+  }
+}
+if (!$domains_src) { hit($ios, 0, "plist:app-bound-missing", "WKAppBoundDomains not found in Info.plist or project.yml") }
+else {
+  hit($ios, 0, "plist:app-bound-too-many", scalar(@domains) . " entries (WebKit honours at most 10)") if @domains > 10;
+  for my $d (@domains) { hit($d->[0], 0, "plist:app-bound-domain", "not allowed: $d->[1]") unless $bound_ok{lc $d->[1]}; }
+}
+
+# --- Privacy manifest --------------------------------------------------------
+if (!@privacy) { hit($ios, 0, "privacy:missing", "PrivacyInfo.xcprivacy not found") }
+for my $f (@privacy) {
+  my $s = slurp($f) // "";
+  hit($f, 0, "privacy:tracking", "NSPrivacyTracking must be <false/>") unless $s =~ m{<key>\s*NSPrivacyTracking\s*</key>\s*<false\s*/>};
+  for my $k (qw(NSPrivacyTrackingDomains NSPrivacyCollectedDataTypes)) {
+    next unless $s =~ m{<key>\s*$k\s*</key>};
+    hit($f, 0, "privacy:not-empty", "$k must be an empty array") unless $s =~ m{<key>\s*$k\s*</key>\s*(?:<array\s*/>|<array>\s*</array>)};
+  }
+}
+
+print "$_\n" for @findings;
+printf "SWIFTFILES %d\n", scalar(@swift);
+print "FINDINGS " . scalar(@findings) . "\n";
+exit(@findings ? 1 : 0);
+PERL
+
+verify_swift() {
+  local out rc n
+  out=$(APP_BOUND="$APP_BOUND" SWIFT_IMPORTS="$SWIFT_IMPORTS" perl -CSD -e "$SWIFT_SCAN" "$ROOT"); rc=$?
+  printf '%s\n' "$out" | grep -v '^SWIFTFILES '
+  n=$(printf '%s\n' "$out" | sed -n 's/^SWIFTFILES //p')
+  case $rc in
+    0) printf 'OK swift=%s\n' "$n"; return 0 ;;
+    1) printf 'FAIL forbidden API or config in ios/ (see findings above)\n'; return 1 ;;
+    *) printf 'FAIL swift scanner error\n'; return 2 ;;
+  esac
+}
+
+# ==========================================================================
+# 3. Secrets: no signing key, certificate or profile anywhere in the repository
+# ==========================================================================
+read -r -d '' SECRET_SCAN <<'PERL'
+use strict; use warnings; use File::Find;
+my $root = shift; my @findings;
+find({ no_chdir => 1, wanted => sub {
+  my $p = $File::Find::name; my $b = $_; $b =~ s{.*/}{};
+  if (-d $p) { $File::Find::prune = 1 if $b =~ /^(?:\.git|node_modules|test-results|playwright-report|DerivedData|build)$/; return; }
+  (my $r = $p) =~ s{^\Q$root\E/}{};
+  if ($b =~ /\.(?:p8|p12|pfx|mobileprovision|provisionprofile|cer|pem|key|jks|keystore)$/i) { push @findings, "$r  secret:file"; return; }
+  return if -s $p > 2_000_000;
+  open(my $fh, "<", $p) or return; local $/; my $s = <$fh>; close $fh;
+  push @findings, "$r  secret:private-key" if $s =~ /-{5}BEGIN [A-Z ]*PRIVATE KEY-{5}/;
+}}, $root);
+print "$_\n" for @findings;
+exit(@findings ? 1 : 0);
+PERL
+
+verify_secrets() {
+  perl -e "$SECRET_SCAN" "$ROOT"
+  case $? in
+    0) return 0 ;;
+    *) printf 'FAIL secret material in the repository (see above)\n'; return 1 ;;
+  esac
+}
+
+# ==========================================================================
+# Self-test
+# ==========================================================================
+selftest() {
+  local tmp n=0 bad=0
+  tmp=$(mktemp -d) || fail "selftest: mktemp" 2
+  trap 'rm -rf "$tmp"' EXIT
+
+  # ---- JS ----
+  local clean='(function () { "use strict"; var el = document.createElement("div"); el.textContent = "ok"; sessionStorage.setItem("reelfree:x", "1"); if (window.webkit) window.webkit.messageHandlers.reelfree.postMessage({ type: "ready" }); })();'
+  printf '%s\n' "$clean" > "$tmp/instagram.js"
+  verify_js "$tmp/instagram.js" >/dev/null || { verify_js "$tmp/instagram.js"; fail "selftest: clean JS sample rejected"; }
+  jcheck() {
+    n=$((n+1)); printf '%s\n' "$2" > "$tmp/instagram.js"
+    if verify_js "$tmp/instagram.js" >/dev/null 2>&1; then printf '  MISSED  js:%s\n' "$1"; bad=$((bad+1))
+    else printf '  caught  js:%s\n' "$1"; fi
+  }
+  jcheck fetch            'fetch("/x")'
+  jcheck fetch-window     'window.fetch("/x")'
+  jcheck xhr              'new XMLHttpRequest()'
+  jcheck websocket        'new WebSocket("wss://a")'
+  jcheck eventsource      'new EventSource("/s")'
+  jcheck beacon           'navigator.sendBeacon("/b", "")'
+  jcheck eval             'eval("1")'
+  jcheck new-function     'new Function("return 1")'
+  jcheck function-call    'Function("return 1")()'
+  jcheck constructor      '[].map.constructor("x")'
+  jcheck settimeout-str   'setTimeout("alert(1)", 10)'
+  jcheck setinterval-str  "setInterval('x()', 10)"
+  jcheck innerhtml        'el.innerHTML = s'
+  jcheck outerhtml        'el.outerHTML = s'
+  jcheck insertadjacent   'el.insertAdjacentHTML("beforeend", s)'
+  jcheck docwrite         'document.write(s)'
+  jcheck domparser        'new DOMParser()'
+  jcheck localstorage     'localStorage.setItem("a", "b")'
+  jcheck indexeddb        'indexedDB.open("a")'
+  jcheck cookie           'document.cookie = "a=b"'
+  jcheck import-dyn       'import("https://x")'
+  jcheck postmessage      'window.postMessage("x", "*")'
+  jcheck bridge-alias     'var h = window.webkit.messageHandlers.reelfree; h.postMessage(1)'
+  jcheck bridge-other     'window.webkit.messageHandlers.other.postMessage(1)'
+  jcheck bridge-index     'window.webkit.messageHandlers["reelfree"].postMessage(1)'
+  jcheck bridge-twice     'window.webkit.messageHandlers.reelfree.postMessage(1); top.postMessage(2)'
+  jcheck window-open      'window.open("/x")'
+  jcheck create-script    'document.createElement("script")'
+  jcheck create-img       "document.createElement('img')"
+  jcheck create-iframe    'document.createElement(`iframe`)'
+  jcheck src-assign       'a.src = u'
+  jcheck setattr-src      'a.setAttribute("src", u)'
+  jcheck ext-url          'const u = "https://evil.example/x"'
+  jcheck proto-rel-url    'const u = "//evil.example/x"'
+  jcheck window-index     'window["fe" + "tch"]("/x")'
+  jcheck css-url          'const c = "a { background: url(x) }"'
+  jcheck css-url-upper    'const c = "a { background: URL(x) }"'
+  jcheck syntax-truncated '(function () { "use strict"; var a = 1;'
+  jcheck atob             'atob("ZmV0Y2g=")'
+  jcheck fromcharcode     'String.fromCharCode(102)'
+  jcheck hex-escape       'const s = "\x66etch"'
+  jcheck gm-api           'GM_xmlhttpRequest({})'
+  jcheck worker           'new Worker(u)'
+  jcheck sw               'navigator.serviceWorker.register(u)'
+  jcheck clipboard        'navigator.clipboard.readText()'
+  jcheck form-submit      'f.submit()'
+  jcheck ss-foreign-key   'sessionStorage.setItem("token", t)'
+  jcheck ss-clear         'sessionStorage.clear()'
+  jcheck bidi             "const s = 'a‮b'"
+  jcheck zero-width       'const a​b = 1'
+  jcheck long-line        "$(printf 'x%.0s' $(seq 1 600))"
+  rm -f "$tmp/instagram.js"
+
+  # ---- Swift / project ----
+  local T="$tmp/root"
+  mk_clean() {
+    rm -rf "$T"; mkdir -p "$T/ios/ReelFree" "$T/web"
+    printf '%s\n' "$clean" > "$T/web/instagram.js"
+    cat > "$T/ios/project.yml" <<'YML'
+name: ReelFree
+targets:
+  ReelFree:
+    type: application
+    platform: iOS
+    sources: [ReelFree]
+    dependencies:
+      - sdk: WebKit.framework
+    info:
+      path: ReelFree/Info.plist
+      properties:
+        WKAppBoundDomains:
+          - instagram.com
+          - www.instagram.com
+YML
+    cat > "$T/ios/ReelFree/Info.plist" <<'PL'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>WKAppBoundDomains</key>
+  <array><string>instagram.com</string><string>www.instagram.com</string></array>
+</dict></plist>
+PL
+    cat > "$T/ios/ReelFree/PrivacyInfo.xcprivacy" <<'PL'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>NSPrivacyTracking</key><false/>
+  <key>NSPrivacyTrackingDomains</key><array/>
+  <key>NSPrivacyCollectedDataTypes</key><array/>
+</dict></plist>
+PL
+    cat > "$T/ios/ReelFree/App.swift" <<'SW'
+import SwiftUI
+import WebKit
+
+func makeWebView(handler: WKScriptMessageHandler) -> WKWebView {
+    let cfg = WKWebViewConfiguration()
+    cfg.limitsNavigationsToAppBoundDomains = true
+    cfg.preferences.javaScriptCanOpenWindowsAutomatically = false
+    let script = WKUserScript(source: "0", injectionTime: .atDocumentStart,
+                              forMainFrameOnly: true, in: .defaultClient)
+    cfg.userContentController.addUserScript(script)
+    cfg.userContentController.add(handler,
+                                  contentWorld: .defaultClient, name: "reelfree")
+    let wv = WKWebView(frame: .zero, configuration: cfg)
+    wv.evaluateJavaScript("0", in: nil, in: .defaultClient) { _ in }
+    return wv
+}
+SW
+  }
+  run_swift() { RF_VERIFY_ROOT="$T" "$SELF" --swift >/dev/null 2>&1; }
+  mk_clean
+  run_swift || { RF_VERIFY_ROOT="$T" "$SELF" --swift; fail "selftest: clean ios/ sample rejected"; }
+  # scheck LABEL SHELL-SNIPPET : mutate a clean tree (cwd = $T), expect FAIL.
+  scheck() {
+    n=$((n+1)); mk_clean
+    (cd "$T" && bash -c "$2") || { printf '  ERROR   %s (setup)\n' "$1"; bad=$((bad+1)); return; }
+    if run_swift; then printf '  MISSED  %s\n' "$1"; bad=$((bad+1)); else printf '  caught  %s\n' "$1"; fi
+  }
+  # sw LABEL SWIFT-LINE : add one line of Swift to a new file.
+  sw() { scheck "swift:$1" "printf '%s\n' 'import WebKit' '$2' > ios/ReelFree/Bad.swift"; }
+  sw url-session        'let s = URLSession.shared'
+  sw nw-connection      'let c = NWConnection(host: "a", port: 1, using: .tcp)'
+  sw remote-contents    'let d = try Data(contentsOf: URL(string: "https://x")!)'
+  sw tls-bypass         'func webView(_ w: WKWebView, didReceive challenge: URLAuthenticationChallenge) {}'
+  sw import-network     'import Network'
+  sw import-thirdparty  'import Alamofire'
+  sw tracking-idfv      'let i = UIDevice.current.identifierForVendor'
+  sw firebase           'FirebaseApp.configure()'
+  sw app-bound-off      'cfg.limitsNavigationsToAppBoundDomains = false'
+  sw page-world         'let s = WKUserScript(source: "0", injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)'
+  sw script-no-world    'let s = WKUserScript(source: "0", injectionTime: .atDocumentStart, forMainFrameOnly: true)'
+  sw script-all-frames  'let s = WKUserScript(source: "0", injectionTime: .atDocumentStart, forMainFrameOnly: false, in: .defaultClient)'
+  sw eval-no-world      'wv.evaluateJavaScript("0")'
+  sw eval-page          'wv.evaluateJavaScript("0", in: nil, in: .page)'
+  sw handler-no-world   'ucc.add(h, name: "reelfree")'
+  sw popups             'p.javaScriptCanOpenWindowsAutomatically = true'
+  sw link-preview       'wv.allowsLinkPreview = true'
+  sw cookies            'let c = WKWebsiteDataStore.default().httpCookieStore'
+  sw cookie-storage     'let c = HTTPCookieStorage.shared'
+  sw clipboard          'UIPasteboard.general.string = s'
+  sw keychain           'SecItemAdd(q, nil)'
+  sw dlopen             'let h = dlopen("x", 0)'
+  sw bidi               "let s = \"a‮b\""
+  scheck app-bound-missing  "sed -i 's/limitsNavigationsToAppBoundDomains = true/limitsNavigationsToAppBoundDomains = nope/' ios/ReelFree/App.swift"
+  scheck no-swift           'rm ios/ReelFree/App.swift'
+  scheck no-ios             'rm -rf ios'
+  scheck ats-plist          "sed -i 's|<dict>|<dict><key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>|' ios/ReelFree/Info.plist"
+  scheck ats-yml            "sed -i 's|      properties:|      properties:\n        NSAppTransportSecurity: {NSAllowsArbitraryLoads: true}|' ios/project.yml"
+  scheck bound-missing      "sed -i 's/WKAppBoundDomains/WKOtherKey/' ios/ReelFree/Info.plist ios/project.yml"
+  scheck bound-foreign-plist "sed -i 's|<string>instagram.com</string>|<string>evil.example</string>|' ios/ReelFree/Info.plist"
+  scheck bound-foreign-yml  "sed -i 's/- instagram.com/- evil.example/' ios/project.yml"
+  scheck bound-wildcard     "sed -i 's/- instagram.com/- \"*.instagram.com\"/' ios/project.yml"
+  scheck bound-too-many     "sed -i 's|<string>instagram.com</string>|$(printf '<string>instagram.com</string>%.0s' $(seq 1 11))|' ios/ReelFree/Info.plist"
+  scheck bound-empty        "sed -i 's|<array><string>instagram.com</string><string>www.instagram.com</string></array>|<array></array>|' ios/ReelFree/Info.plist"
+  scheck yml-packages       "printf 'packages:\n  Foo:\n    url: x\n' >> ios/project.yml"
+  scheck yml-dep-package    "sed -i 's/- sdk: WebKit.framework/- package: Foo/' ios/project.yml"
+  scheck yml-dep-framework  "sed -i 's/- sdk: WebKit.framework/- framework: Foo.xcframework/' ios/project.yml"
+  scheck yml-download       "printf '    preBuildScripts:\n      - script: curl -s x | sh\n' >> ios/project.yml"
+  scheck spm-manifest       'touch ios/Package.swift'
+  scheck podfile            'touch ios/Podfile'
+  scheck xcframework        'mkdir ios/Foo.xcframework'
+  scheck static-lib         'touch ios/libfoo.a'
+  scheck privacy-missing    'rm ios/ReelFree/PrivacyInfo.xcprivacy'
+  scheck privacy-tracking   "sed -i 's|<key>NSPrivacyTracking</key><false/>|<key>NSPrivacyTracking</key><true/>|' ios/ReelFree/PrivacyInfo.xcprivacy"
+  scheck privacy-collected  "sed -i 's|<key>NSPrivacyCollectedDataTypes</key><array/>|<key>NSPrivacyCollectedDataTypes</key><array><dict/></array>|' ios/ReelFree/PrivacyInfo.xcprivacy"
+  scheck secret-p8          'touch ios/AuthKey_ABC.p8'
+  scheck secret-pem-content "printf '%s\n' '-----BEGIN ''PRIVATE KEY-----' > docs.txt"
+
+  printf 'selftest: %d/%d rules caught\n' $((n-bad)) "$n"
+  [ $bad -eq 0 ] || fail "selftest: $bad rule(s) missed"
+  printf 'OK selftest %d/%d\n' "$n" "$n"
+  exit 0
+}
+
+# ==========================================================================
+# Main
+# ==========================================================================
+[ $# -le 1 ] || fail "usage: bin/verify [--js | --swift | --selftest | FILE.js]" 2
+mode=${1:-all}
+
+case $mode in
+  --selftest) selftest ;;
+  --js|--swift|all) ;;
+  -*) fail "usage: bin/verify [--js | --swift | --selftest | FILE.js]" 2 ;;
+  *)  verify_js "$mode"; exit $? ;;
+esac
+
+rc=0; summary=""; okline=""
+note() { [ "$1" -eq 0 ] || { [ "$1" -gt "$rc" ] && rc=$1; summary="${summary:+$summary; }$2"; }; }
+
+if [ "$mode" != --swift ]; then
+  [ -f "$ROOT/web/instagram.js" ] || fail "file not found: web/instagram.js" 2
+  # Every script in web/ is injected or could be: each one must be a known, checked file.
+  stray=$(find "$ROOT/web" -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) \
+            ! -path "$ROOT/web/instagram.js" ! -path "$ROOT/web/youtube.js" -printf '%P ' 2>/dev/null)
+  [ -z "$stray" ] || note 1 "unexpected script(s) in web/: $stray"
+  for f in "$ROOT/web/instagram.js" "$ROOT/web/youtube.js"; do
+    [ -f "$f" ] || continue
+    name=$(basename "$f" .js)
+    printf '== web/%s.js\n' "$name"
+    out=$(verify_js "$f"); r=$?
+    printf '%s\n' "$out" | sed '$d'
+    last=$(printf '%s\n' "$out" | tail -1)
+    if [ $r -eq 0 ]; then okline="$okline $name=${last#OK sha256=}"
+    else note $r "$name.js: ${last#FAIL }"; fi
+  done
+fi
+
+if [ "$mode" != --js ]; then
+  printf '== ios/\n'
+  out=$(verify_swift); r=$?
+  printf '%s\n' "$out" | sed '$d'
+  last=$(printf '%s\n' "$out" | tail -1)
+  if [ $r -eq 0 ]; then okline="$okline ${last#OK }"; else note $r "ios/: ${last#FAIL }"; fi
+
+  printf '== secrets\n'
+  out=$(verify_secrets); r=$?
+  [ -z "$out" ] || printf '%s\n' "$out" | { [ $r -eq 0 ] && cat || sed '$d'; }
+  note $r "secret material in the repository"
+fi
+
+[ $rc -eq 0 ] || fail "$summary" "$rc"
+printf 'OK%s\n' "$okline"
+exit 0

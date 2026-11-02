@@ -1,0 +1,68 @@
+# XcodeGen spec — run `xcodegen` in ios/ (CI only; no .xcodeproj is committed).
+name: ReelFree
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  developmentLanguage: fr
+
+settings:
+  base:
+    # Overridden by CI: xcodebuild ... RF_BUNDLE_ID=... RF_TEAM_ID=...
+    RF_BUNDLE_ID: com.example.reelfree
+    RF_TEAM_ID: ""
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    DEVELOPMENT_TEAM: $(RF_TEAM_ID)
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  ReelFree:
+    type: application
+    platform: iOS
+    sources:
+      - path: ReelFree
+        excludes:
+          - Resources/PrivacyInfo.xcprivacy
+      - path: ReelFree/Resources/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: ../web/instagram.js
+        buildPhase: resources
+      - path: ../web/youtube.js
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: ReelFree
+        PRODUCT_BUNDLE_IDENTIFIER: $(RF_BUNDLE_ID)
+        INFOPLIST_FILE: ReelFree/Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+    scheme:
+      testTargets:
+        - ReelFreeTests
+      gatherCoverageData: false
+
+  ReelFreeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ReelFreeTests
+      # Shared vectors owned by rf-web (docs/SPEC-iOS.md). Optional so a missing file never
+      # breaks project generation; the test fails explicitly if it cannot find them.
+      - path: ../tests/vectors/policy.json
+        buildPhase: resources
+        optional: true
+    dependencies:
+      - target: ReelFree
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(RF_BUNDLE_ID).tests
+        GENERATE_INFOPLIST_FILE: YES

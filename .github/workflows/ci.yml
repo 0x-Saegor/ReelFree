@@ -1,0 +1,131 @@
+# ReelFree — CI: JS tests + static security gate (Linux), then Swift build + XCTest (macOS).
+# Also called by testflight.yml (workflow_call) so that no build is uploaded without green tests.
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Must match ios/project.yml (rf-ios).
+  RF_PROJECT: ios/ReelFree.xcodeproj
+  RF_SCHEME: ReelFree
+
+jobs:
+  web:
+    name: JS tests + bin/verify (ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install Playwright WebKit
+        run: npx playwright install --with-deps webkit
+
+      - name: npm test (unit + e2e WebKit)
+        run: npm test
+
+      - name: Test summary
+        if: always()
+        run: cat board/last-test.txt || true
+
+      - name: bin/verify self-test
+        run: bin/verify --selftest
+
+      - name: bin/verify (web/ + ios/)
+        run: bin/verify
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
+  ios:
+    name: Swift build + XCTest (macos-15)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Pick an iPhone simulator
+        id: sim
+        run: |
+          udid=$(xcrun simctl list devices available -j \
+            | jq -r '[.devices | to_entries[] | select(.key | test("iOS")) | .value[]
+                      | select(.name | startswith("iPhone"))] | last | .udid')
+          if [ -z "$udid" ] || [ "$udid" = null ]; then
+            xcrun simctl list devices available
+            echo "::error::no iPhone simulator available"; exit 1
+          fi
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+          xcrun simctl list devices available | grep "$udid"
+
+      - name: Build for testing
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project "$RF_PROJECT" -scheme "$RF_SCHEME" \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee "$RUNNER_TEMP/build.log" | grep -E '^(error|warning: .*ReelFree|\*\*)' || true
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Test (simulator)
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project "$RF_PROJECT" -scheme "$RF_SCHEME" \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            -resultBundlePath "$RUNNER_TEMP/tests.xcresult" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcresult
+          path: |
+            ${{ runner.temp }}/tests.xcresult
+            ${{ runner.temp }}/build.log
+          retention-days: 7

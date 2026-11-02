@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# ReelFree dashboard — live view of agents, tasks, tests and files. q = quit.
+cd "$(dirname "$0")/.." || exit 1
+ROOT=$PWD
+B=$'\e[1m' D=$'\e[2m' R=$'\e[0m' GR=$'\e[32m' YE=$'\e[33m' RE=$'\e[31m' CY=$'\e[36m'
+
+agents() {
+  # name<TAB>terminal map written by the orchestrator (herdr desktop / herdr-core)
+  [ -f board/agents.tsv ] || return
+  while IFS=$'\t' read -r name t; do
+    st=$(herdr-core get "$t" --json 2>/dev/null | jq -r 'if .state=="finished" then "exited" else (.status.state // .state // "?") end')
+    printf '%s\t%s\t%s\n' "$name" "${st:-gone}" "$t"
+  done < board/agents.tsv
+}
+
+rep() { local i; for ((i=0;i<$2;i++)); do printf '%s' "$1"; done; }
+
+render() {
+  local cols; cols=$(tput cols)
+  printf '%s\n\n' "${B}${CY}━━ ReelFree ━━${R} ${D}$(date +%H:%M:%S) · $ROOT${R}"
+
+  printf '%s\n' "${B}AGENTS${R}"
+  local found=0
+  while IFS=$'\t' read -r name st pane; do
+    [ -n "$name" ] || continue; found=1
+    case $st in working) c=$YE;; idle|done|waiting) c=$GR;; blocked) c=$RE;; *) c=$D;; esac
+    line=$(head -1 "board/status/$name.md" 2>/dev/null)
+    msg=$(herdr-core get "$pane" --json 2>/dev/null | jq -r '.status.msg // empty')
+    [ -n "$msg" ] && [ "$st" = working ] && line="$line ${D}› $msg${R}"
+    printf "  %-10s ${c}%-8s${R} ${D}%-6s${R} %s\n" "$name" "$st" "$pane" "${line:0:$((cols-30))}"
+  done < <(agents)
+  [ $found = 1 ] || printf '  %s\n' "${D}(aucun agent rf-* vivant)${R}"
+
+  local todo doing done blk
+  todo=$(grep -c '^- \[ \]' board/TASKS.md); doing=$(grep -c '^- \[~\]' board/TASKS.md)
+  done=$(grep -c '^- \[x\]' board/TASKS.md); blk=$(grep -c '^- \[!\]' board/TASKS.md)
+  local total=$((todo+doing+done+blk)) w=30 fill=0
+  [ $total -gt 0 ] && fill=$((done*w/total))
+  printf '\n%s  %s%s%s%s  %d/%d  %s\n' "${B}TÂCHES${R}" "$GR" "$(rep █ $fill)" "$D$(rep ░ $((w-fill)))" "$R" \
+    "$done" "$total" "${YE}~$doing${R} ${RE}!$blk${R} ${D}·$todo${R}"
+  grep -E '^- \[(~|!)\]' board/TASKS.md | while read -r l; do
+    case $l in *'[!]'*) c=$RE;; *) c=$YE;; esac
+    printf '  %s%s%s\n' "$c" "${l:2:$((cols-4))}" "$R"
+  done
+  grep -E '^- \[ \]' board/TASKS.md | head -4 | while read -r l; do printf '  %s%s%s\n' "$D" "${l:2:$((cols-4))}" "$R"; done
+
+  printf '\n%s ' "${B}TESTS${R}"
+  if [ -s board/last-test.txt ]; then
+    t=$(head -1 board/last-test.txt); case $t in PASS*) printf '%s\n' "$GR$t$R";; *) printf '%s\n' "$RE$t$R";; esac
+  else printf '%s\n' "${D}pas encore lancés${R}"; fi
+
+  printf '%s ' "${B}SÉCU${R}"
+  if [ -x bin/verify ] && [ -f src/reelfree.user.js ]; then
+    if out=$(bin/verify 2>&1 | tail -1); then printf '%s\n' "$GR$out$R"; else printf '%s\n' "$RE$out$R"; fi
+  else printf '%s\n' "${D}bin/verify ou src/ pas encore là${R}"; fi
+
+  printf '\n%s\n' "${B}DEMANDES INTER-AGENTS${R}"
+  local any=0
+  for f in board/status/*.md; do
+    [ -f "$f" ] || continue
+    req=$(awk '/^## Demandes/{f=1;next} /^## /{f=0} f && NF' "$f" | head -3)
+    [ -n "$req" ] && { any=1; printf '  %s%s%s\n' "$CY" "$(basename "$f" .md)" "$R"; sed "s/^/    /" <<<"$req" | cut -c1-$((cols-2)); }
+  done
+  [ $any = 1 ] || printf '  %s\n' "${D}aucune${R}"
+
+  printf '\n%s %s\n' "${B}FICHIERS${R}" "${D}$(git status --short 2>/dev/null | wc -l) modifiés/nouveaux${R}"
+  find src docs tests bin -type f -newer board/TASKS.md -printf '%TT %p\n' 2>/dev/null | sort -r | head -5 | cut -c1-8,20- | sed "s/^/  $D/;s/$/$R/"
+}
+
+SELF_MTIME=$(stat -c %Y "$0")
+trap 'tput cnorm; exit' INT TERM
+tput civis
+while :; do
+  frame=$(render)
+  printf '\e[H\e[2J%s' "$frame"
+  read -rsn1 -t 3 k && [ "$k" = q ] && break
+  [ "$(stat -c %Y "$0")" = "$SELF_MTIME" ] || exec "$0"
+done
+tput cnorm

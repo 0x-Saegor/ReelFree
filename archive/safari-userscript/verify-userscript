@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+# ReelFree — bin/verify
+# Static security gate for the userscripts (rf-sec, T10).
+#
+# Usage:
+#   bin/verify               # every deliverable in src/ (Instagram, + YouTube if present)
+#   bin/verify FILE          # a single file
+#   bin/verify --selftest    # check that every rule catches a known-bad sample
+#
+# Prints the full SHA-256, then one line per finding, and ends with exactly one of:
+#   OK sha256=<first 12 hex chars>                      (single file, or src/ without YouTube)
+#   OK sha256=<12 Instagram> youtube=<12 YouTube>       (src/ with both scripts)
+#   FAIL <reason>
+# Exit code: 0 = OK, 1 = forbidden API / bad metadata, 2 = usage or I/O error.
+#
+# The scan is deliberately raw: comments and strings are scanned too, so that a
+# forbidden call cannot hide behind a fake comment delimiter. Do not name
+# forbidden APIs in comments of src/ (write "network call" rather than the API name).
+set -u
+export LC_ALL=C.UTF-8
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+
+fail() { printf 'FAIL %s\n' "$1"; exit "${2:-1}"; }
+
+# --------------------------------------------------------------------------
+# Self-test: each sample must FAIL, the clean sample must pass.
+# --------------------------------------------------------------------------
+if [ "${1:-}" = "--selftest" ]; then
+  tmp=$(mktemp -d) || fail "selftest: mktemp" 2
+  trap 'rm -rf "$tmp"' EXIT
+  hdr='// ==UserScript==
+// @name         ReelFree
+// @version      0.0.0
+// @match        https://www.instagram.com/*
+// @run-at       document-start
+// @noframes
+// @grant        none
+// ==/UserScript==
+'
+  printf '%s%s\n' "$hdr" '(function () { "use strict"; const el = document.createElement("div"); el.textContent = "ok"; sessionStorage.setItem("reelfree:x", "1"); })();' > "$tmp/reelfree.user.js"
+  out=$("$0" "$tmp/reelfree.user.js"); rc=$?
+  [ $rc -eq 0 ] || { printf '%s\n' "$out"; fail "selftest: clean sample rejected"; }
+
+  n=0; bad=0
+  check() { # $1 = label, $2 = body appended to a valid header, or full file if $3=raw
+    n=$((n+1))
+    if [ "${3:-}" = raw ]; then printf '%s\n' "$2" > "$tmp/reelfree.user.js"
+    else printf '%s%s\n' "$hdr" "$2" > "$tmp/reelfree.user.js"; fi
+    if "$0" "$tmp/reelfree.user.js" >/dev/null 2>&1; then
+      printf '  MISSED  %s\n' "$1"; bad=$((bad+1))
+    else printf '  caught  %s\n' "$1"; fi
+  }
+  check fetch            'fetch("/x")'
+  check fetch-window     'window.fetch("/x")'
+  check xhr              'new XMLHttpRequest()'
+  check websocket        'new WebSocket("wss://a")'
+  check eventsource      'new EventSource("/s")'
+  check beacon           'navigator.sendBeacon("/b", "")'
+  check eval             'eval("1")'
+  check new-function     'new Function("return 1")'
+  check function-call    'Function("return 1")()'
+  check constructor      '[].map.constructor("x")'
+  check settimeout-str   'setTimeout("alert(1)", 10)'
+  check setinterval-str  "setInterval('x()', 10)"
+  check innerhtml        'el.innerHTML = s'
+  check outerhtml        'el.outerHTML = s'
+  check insertadjacent   'el.insertAdjacentHTML("beforeend", s)'
+  check docwrite         'document.write(s)'
+  check domparser        'new DOMParser()'
+  check localstorage     'localStorage.setItem("a", "b")'
+  check indexeddb        'indexedDB.open("a")'
+  check cookie           'document.cookie = "a=b"'
+  check import-dyn       'import("https://x")'
+  check postmessage      'window.postMessage("x", "*")'
+  check window-open      'window.open("/x")'
+  check create-script    'document.createElement("script")'
+  check create-img       "document.createElement('img')"
+  check create-iframe    'document.createElement(`iframe`)'
+  check src-assign       'a.src = u'
+  check setattr-src      'a.setAttribute("src", u)'
+  check ext-url          'const u = "https://evil.example/x"'
+  check proto-rel-url    'const u = "//evil.example/x"'
+  check window-index     'window["fe" + "tch"]("/x")'
+  check css-url          'const c = "a { background: url(x) }"'
+  check css-url-upper    'const c = "a { background: URL(x) }"'
+  check syntax-truncated '(function () { "use strict"; var a = 1;'
+  check atob             'atob("ZmV0Y2g=")'
+  check fromcharcode     'String.fromCharCode(102)'
+  check hex-escape       'const s = "\x66etch"'
+  check gm-api           'GM_xmlhttpRequest({})'
+  check unsafewindow     'unsafeWindow.x = 1'
+  check worker           'new Worker(u)'
+  check sw               'navigator.serviceWorker.register(u)'
+  check clipboard        'navigator.clipboard.readText()'
+  check form-submit      'f.submit()'
+  check ss-foreign-key   'sessionStorage.setItem("token", t)'
+  check ss-clear         'sessionStorage.clear()'
+  check bidi             "const s = 'a‮b'"
+  check zero-width       'const a​b = 1'
+  check long-line        "$(printf 'x%.0s' $(seq 1 600))"
+  check meta-require     "${hdr/\/\/ @grant/\/\/ @require https://x/y.js
+// @grant}" raw
+  check meta-connect     "${hdr/\/\/ @grant/\/\/ @connect evil.example
+// @grant}" raw
+  check meta-updateurl   "${hdr/\/\/ @grant/\/\/ @updateURL https://x
+// @grant}" raw
+  check meta-downloadurl "${hdr/\/\/ @grant/\/\/ @downloadURL https://x
+// @grant}" raw
+  check meta-resource    "${hdr/\/\/ @grant/\/\/ @resource a https://x
+// @grant}" raw
+  check meta-grant       "${hdr/@grant        none/@grant        GM.xmlHttpRequest}" raw
+  check meta-2grants     "${hdr/\/\/ @grant/\/\/ @grant GM_info
+// @grant}" raw
+  check meta-match       "${hdr/www.instagram.com\/\*/*://*\/*}" raw
+  check meta-inject-page "${hdr/\/\/ @grant/\/\/ @inject-into page
+// @grant}" raw
+  check meta-include     "${hdr/\/\/ @grant/\/\/ @include *
+// @grant}" raw
+  check meta-no-runat    "${hdr/\/\/ @run-at       document-start
+/}" raw
+  check meta-no-noframes "${hdr/\/\/ @noframes
+/}" raw
+  check meta-no-grant    "${hdr/\/\/ @grant        none
+/}" raw
+  check meta-missing     '(function () {})();' raw
+  printf 'selftest: %d/%d rules caught\n' $((n-bad)) "$n"
+  [ $bad -eq 0 ] || fail "selftest: $bad rule(s) missed"
+  printf 'OK selftest %d/%d\n' "$n" "$n"
+  exit 0
+fi
+
+# --------------------------------------------------------------------------
+# Normal run
+# --------------------------------------------------------------------------
+[ $# -le 1 ] || fail "usage: bin/verify [FILE] | --selftest | --readme" 2
+
+# --readme: verify src/, then rewrite the SHA256SUMS block of README.md between the
+# sha256:begin / sha256:end markers. Nothing is written if verification fails.
+if [ "${1:-}" = "--readme" ]; then
+  out=$("$0"); r=$?
+  printf '%s\n' "$out"
+  [ $r -eq 0 ] || exit $r
+  [ -f "$ROOT/README.md" ] || fail "README.md not found" 2
+  sums=$(printf '%s\n' "$out" | sed -n '/^== SHA256SUMS/,/^OK /p' | sed '1d;$d')
+  SUMS="$sums" perl -0pi -e '
+    my $b = "```\n$ENV{SUMS}\n```\n";
+    s{(<!-- sha256:begin[^\n]*-->\n).*?(<!-- sha256:end -->)}{$1$b$2}s or die "markers not found\n";
+  ' "$ROOT/README.md" || fail "README.md: sha256 markers not found" 2
+  printf 'README.md updated\n'
+  printf '%s\n' "$out" | tail -1
+  exit 0
+fi
+
+# No argument: verify every deliverable in src/ (reelfree.user.js is mandatory,
+# reelfree-youtube.user.js optional), refuse any other script lying in src/,
+# print a sha256sum-compatible block for the README, and summarise on the last line.
+if [ $# -eq 0 ]; then
+  [ -f "$ROOT/web/instagram.js" ] || fail "file not found: web/instagram.js" 2
+  stray=$(find "$ROOT/src" -maxdepth 1 -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) \
+            ! -name reelfree.user.js ! -name reelfree-youtube.user.js -printf '%f ' 2>/dev/null)
+  rc=0; summary=""; sums=""
+  for f in "$ROOT/web/instagram.js" "$ROOT/web/youtube.js"; do
+    [ -f "$f" ] || continue
+    printf '== %s\n' "${f#"$ROOT"/}"
+    out=$("$0" "$f"); r=$?
+    printf '%s\n' "$out" | sed '$d'
+    last=$(printf '%s\n' "$out" | tail -1)
+    if [ $r -ne 0 ]; then
+      rc=$r; summary="${summary:+$summary; }$(basename "$f"): ${last#FAIL }"
+    else
+      sums="$sums$(cd "$ROOT" && sha256sum "src/$(basename "$f")")"$'\n'
+    fi
+  done
+  [ -z "$stray" ] || { rc=1; summary="${summary:+$summary; }unexpected script(s) in src/: $stray"; }
+  [ $rc -eq 0 ] || fail "$summary" "$rc"
+  printf '== SHA256SUMS (README)\n%s' "$sums"
+  main=$(sha256sum "$ROOT/web/instagram.js" | cut -c1-12)
+  if [ -f "$ROOT/web/youtube.js" ]; then
+    printf 'OK sha256=%s youtube=%s\n' "$main" "$(sha256sum "$ROOT/web/youtube.js" | cut -c1-12)"
+  else
+    printf 'OK sha256=%s\n' "$main"
+  fi
+  exit 0
+fi
+
+FILE=$1
+[ -f "$FILE" ] || fail "file not found: $FILE" 2
+[ -r "$FILE" ] || fail "file not readable: $FILE" 2
+
+# Allowed @match values and allowed absolute URL hosts depend on the file name.
+case $(basename "$FILE") in
+  reelfree.user.js)
+    MATCHES='https://www.instagram.com/*'
+    HOSTS='www.instagram.com' ;;
+  reelfree-youtube.user.js)
+    MATCHES='https://m.youtube.com/* https://www.youtube.com/*'
+    HOSTS='m.youtube.com www.youtube.com' ;;
+  *) fail "unknown script name: $(basename "$FILE") (expected reelfree.user.js or reelfree-youtube.user.js)" 2 ;;
+esac
+
+SHA=$(sha256sum -- "$FILE" | cut -d' ' -f1) || fail "sha256sum failed" 2
+
+# A script that does not parse never runs, so the fail-closed CSS is never injected
+# and the page stays visible (fail-open). Syntax errors are therefore blocking.
+if command -v node >/dev/null 2>&1; then
+  synerr=$(node --check -- "$FILE" 2>&1) || {
+    printf '%s\n' "$synerr" | head -5
+    fail "syntax error in $(basename "$FILE") (script would not run: fail-open)" 1
+  }
+else
+  printf 'WARN node not found: syntax check skipped\n'
+fi
+printf 'file   %s\n' "$FILE"
+printf 'sha256 %s\n' "$SHA"
+
+MATCHES="$MATCHES" HOSTS="$HOSTS" perl -CSD -e '
+use strict; use warnings;
+my $file = shift;
+open(my $fh, "<:encoding(UTF-8)", $file) or do { print "ERR cannot open\n"; exit 2 };
+my @lines = <$fh>; close $fh;
+my @allowed_match = split / /, $ENV{MATCHES};
+my %allowed_host  = map { $_ => 1 } split / /, $ENV{HOSTS};
+my @findings;
+sub hit { my ($n, $rule, $txt) = @_; $txt =~ s/^\s+|\s+$//g; $txt = substr($txt, 0, 120);
+          push @findings, sprintf("L%-5s %-22s %s", $n, $rule, $txt); }
+
+# --- 1. Code rules (token level, scanned on raw text) ---------------------
+my @rules = (
+  # network
+  [ "net:fetch",          qr/\bfetch\b/ ],
+  [ "net:xhr",            qr/XMLHttpRequest/ ],
+  [ "net:websocket",      qr/WebSocket/ ],
+  [ "net:eventsource",    qr/EventSource/ ],
+  [ "net:beacon",         qr/sendBeacon/ ],
+  [ "net:webrtc",         qr/RTCPeerConnection|RTCDataChannel/ ],
+  [ "net:worker",         qr/\b(?:Shared)?Worker\s*\(|serviceWorker|importScripts/ ],
+  [ "net:postmessage",    qr/postMessage/ ],
+  [ "net:window.open",    qr/\bwindow\s*\.\s*open\b|\bopen\s*\(\s*[\x27"`]/ ],
+  [ "net:form",           qr/\.\s*submit\s*\(|requestSubmit|formAction|\.\s*action\s*=(?!=)/ ],
+  [ "net:resource-elem",  qr/createElement(?:NS)?\s*\(\s*(?:[^,)]*,\s*)?[\x27"`]\s*(?:script|img|image|iframe|frame|link|object|embed|audio|video|source|track|form|base|meta|svg|use|picture)\b/i ],
+  [ "net:src-assign",     qr/\.\s*(?:src|srcset|data|poster|background)\s*=(?!=)|setAttribute\s*\(\s*[\x27"`](?:src|srcset|href|xlink:href|data|poster|action|formaction|style)[\x27"`]/i ],
+  [ "net:css-url",        qr/(?<!new )(?<![\w.])url\s*\(|\@import/i ],
+  # dynamic code
+  [ "code:eval",          qr/\beval\b/ ],
+  [ "code:Function",      qr/\bFunction\s*\(/ ],
+  [ "code:constructor",   qr/\.\s*constructor\s*\(|\[\s*[\x27"`]constructor/ ],
+  [ "code:timer-string",  qr/\bset(?:Timeout|Interval|Immediate)\s*\(\s*[\x27"`]/ ],
+  [ "code:import",        qr/\bimport\s*\(|\bimport\s+[\w{*]|\brequire\s*\(/ ],
+  [ "code:html-sink",     qr/innerHTML|outerHTML|insertAdjacentHTML|document\s*\.\s*write|createContextualFragment|DOMParser|srcdoc|setHTML(?:Unsafe)?\b|parseHTMLUnsafe/ ],
+  [ "code:obfuscation",   qr/\batob\b|\bbtoa\b|fromCharCode|fromCodePoint|\\x[0-9a-fA-F]{2}|\bunescape\b|decodeURIComponent\s*\(\s*[\x27"`]%/ ],
+  [ "code:dynamic-global",qr/\b(?:window|globalThis|self|top|parent|document|navigator)\s*\[/ ],
+  [ "code:userscript-api",qr/\bGM[_.]|unsafeWindow|\b(?:browser|chrome)\s*\.\s*(?:runtime|storage|tabs|extension|scripting|webRequest)\b/ ],
+  # persistence / identity
+  [ "store:localStorage", qr/localStorage/ ],
+  [ "store:indexedDB",    qr/indexedDB|openDatabase|\bcaches\b|CacheStorage/ ],
+  [ "store:cookie",       qr/\.\s*cookie\b|cookieStore/ ],
+  [ "store:ss-bulk",      qr/sessionStorage\s*(?:\[|\.\s*(?:clear|key|length)\b)/ ],
+  [ "read:clipboard",     qr/clipboard|execCommand/ ],
+);
+for my $i (0 .. $#lines) {
+  my $l = $lines[$i]; my $n = $i + 1;
+  for my $r (@rules) { hit($n, $r->[0], $l) if $l =~ $r->[1]; }
+
+  # sessionStorage keys must be string literals starting with "reelfree:" or an
+  # identifier/expression that is reviewed manually (reported as a warning below).
+  while ($l =~ /sessionStorage\s*\.\s*(?:getItem|setItem|removeItem)\s*\(\s*([^,)]*)/g) {
+    my $k = $1; $k =~ s/\s+$//;
+    if ($k =~ /^[\x27"`]/) { hit($n, "store:ss-key", $l) unless $k =~ /^[\x27"`]reelfree:/; }
+  }
+  # absolute / protocol-relative URLs to hosts other than the allowed ones
+  while ($l =~ m{(?:\b[a-z][a-z0-9+.-]*:)?//([A-Za-z0-9.-]+)}g) {
+    my $host = lc $1; my $full = $&;
+    next if $full !~ /^(?:https?:|wss?:|ftp:)?\/\// ;   # only URL-ish schemes
+    next if $full =~ /^\/\// && $l !~ /[\x27"`]\/\/\Q$host\E/i;  # a // comment, not a URL literal
+    hit($n, "net:foreign-url", $l) unless $allowed_host{$host};
+  }
+  # Trojan Source / invisible characters
+  hit($n, "text:invisible-char", "(bidi or zero-width character)")
+    if $l =~ /[\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{2064}\x{2066}-\x{2069}\x{FEFF}\x{00AD}]/;
+  # no minification
+  hit($n, "text:long-line", length($l) . " chars") if length($l) > 400;
+}
+
+# --- 2. Metadata block -----------------------------------------------------
+my ($s, $e);
+for my $i (0 .. $#lines) {
+  $s //= $i if $lines[$i] =~ m{^\s*//\s*==UserScript==\s*$};
+  if (defined $s && $lines[$i] =~ m{^\s*//\s*==/UserScript==\s*$}) { $e = $i; last; }
+}
+if (!defined $s || !defined $e) {
+  push @findings, "meta   missing ==UserScript== block";
+} else {
+  my (%seen, @grants, @matches);
+  for my $i ($s + 1 .. $e - 1) {
+    my $n = $i + 1;
+    next unless $lines[$i] =~ m{^\s*//\s*\@([\w:-]+)\s*(.*?)\s*$};
+    my ($k, $v) = ($1, $2); $seen{$k}++;
+    if ($k =~ /^(?:require|connect|updateURL|downloadURL|installURL|resource|include|exclude|top-level-await)$/i
+        && $k !~ /^exclude-match$/) {
+      hit($n, "meta:\@$k", $lines[$i]);
+    }
+    push @grants,  [$n, $v] if $k eq "grant";
+    push @matches, [$n, $v] if $k eq "match";
+    hit($n, "meta:inject-into", $lines[$i]) if $k eq "inject-into" && $v ne "content";
+    hit($n, "meta:run-at", $lines[$i]) if $k eq "run-at" && $v ne "document-start";
+  }
+  push @findings, "meta   \@grant must appear exactly once with value none" unless @grants == 1 && $grants[0][1] eq "none";
+  push @findings, "meta   missing \@run-at document-start" unless $seen{"run-at"};
+  push @findings, "meta   missing \@noframes"              unless $seen{"noframes"};
+  push @findings, "meta   missing \@match"                 unless @matches;
+  for my $m (@matches) {
+    hit($m->[0], "meta:\@match", "\@match $m->[1] (allowed: @allowed_match)")
+      unless grep { $_ eq $m->[1] } @allowed_match;
+  }
+}
+
+# --- 3. Warnings (manual review, do not fail) -----------------------------
+for my $i (0 .. $#lines) {
+  my $l = $lines[$i];
+  while ($l =~ /sessionStorage\s*\.\s*(?:getItem|setItem|removeItem)\s*\(\s*([^,)]*)/g) {
+    my $k = $1;
+    print sprintf("WARN L%-5s sessionStorage key is not a literal, check it is reelfree:-prefixed: %s\n", $i + 1, $k)
+      unless $k =~ /^\s*[\x27"`]/;
+  }
+}
+
+print "$_\n" for @findings;
+print "FINDINGS " . scalar(@findings) . "\n";
+exit(@findings ? 1 : 0);
+' "$FILE"
+rc=$?
+
+case $rc in
+  0) printf 'OK sha256=%s\n' "${SHA:0:12}"; exit 0 ;;
+  1) fail "forbidden API or metadata in $(basename "$FILE") (see findings above)" 1 ;;
+  *) fail "scanner error (rc=$rc)" 2 ;;
+esac

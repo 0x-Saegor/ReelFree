@@ -1,0 +1,36 @@
+<!doctype html>
+<!-- Synthetic Instagram-like SPA shell (no real content). Used until rf-recon fixtures exist. -->
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Instagram (fixture)</title>
+<style>body{margin:0;font:14px system-ui} article{height:400px;border-bottom:1px solid #ddd} nav{position:fixed;bottom:0;left:0;right:0;display:flex;justify-content:space-around;background:#fff}</style>
+</head>
+<body>
+<main role="main" id="main">
+  <article data-fixture="post">post 1</article>
+  <article data-fixture="post">post 2</article>
+  <article data-fixture="post">post 3</article>
+</main>
+<nav role="navigation">
+  <a href="/">Accueil</a>
+  <a href="/explore/">Explorer</a>
+  <a href="/reels/">Reels</a>
+  <a href="/direct/inbox/">Messages</a>
+  <a href="/someuser/">Profil</a>
+</nav>
+<script>
+  // Minimal client-side router: like Instagram, links navigate with pushState.
+  window.__spa = {
+    go: function (to) { history.pushState({}, '', to); window.dispatchEvent(new Event('spa:route')); }
+  };
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest && e.target.closest('a[href^="/"]');
+    if (!a) return;
+    e.preventDefault();
+    window.__spa.go(a.getAttribute('href'));
+  });
+</script>
+</body>
+</html>
