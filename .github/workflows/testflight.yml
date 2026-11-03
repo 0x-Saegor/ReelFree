@@ -28,9 +28,10 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   upload:
-    name: Archive + upload (macos-15)
+    name: Archive + upload (macos-26)
     needs: tests
-    runs-on: macos-15
+    # App Store Connect only accepts builds made with the iOS 26 SDK (Xcode 26) or later.
+    runs-on: macos-26
     timeout-minutes: 60
     environment: testflight
     steps:
@@ -54,7 +55,12 @@ jobs:
 
       - name: Toolchain
         run: |
+          # Newest Xcode 26.x on the image (App Store Connect requires the iOS 26 SDK).
+          x=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$x" ] && sudo xcode-select -s "$x"
           xcodebuild -version
+          major=$(xcodebuild -version | awk 'NR==1{split($2,v,"."); print v[1]}')
+          [ "${major:-0}" -ge 26 ] || { echo "::error::Xcode 26+ required for App Store Connect uploads"; exit 1; }
           # Fail early if this Xcode does not know the API-key auth flags.
           xcodebuild -help 2>&1 | grep -q -- '-authenticationKeyIssuerID' \
             || { echo "::error::xcodebuild lacks -authenticationKey* flags"; exit 1; }
