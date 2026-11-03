@@ -124,6 +124,7 @@ Ces secrets ne sont jamais affichés dans les logs, GitHub les masque. Le workfl
 | `ASC_KEY_P8_BASE64 does not decode to a .p8 key` | Base64 mal copié (retours à la ligne, espaces) | Réencoder sur une seule ligne |
 | `Cloud signing permission error` | Clé API sans rôle Admin | Recréer la clé avec l'accès **Admin** |
 | `No profiles for '<bundle id>' were found` / `No Account for Team` | `APPLE_TEAM_ID` ou `RF_BUNDLE_ID` faux, ou App ID non enregistré | Étapes 1 et 4 |
+| `Communication with Apple failed: Your team…` puis `No profiles for '<bundle id>' were found` | Aucun appareil enregistré sur le compte : l'archive est d'abord signée avec un profil de développement, qui exige au moins un appareil | developer.apple.com → Devices → **+** : enregistrer l'iPhone du testeur (UDID), puis relancer le workflow |
 | `Error Downloading App Information` / `No suitable application records were found` | Pas de fiche d'app pour ce bundle id dans App Store Connect | Étape 2 |
 | `The bundle version must be higher than the previously uploaded version` | Numéro de build déjà utilisé (dépôt recréé, `run_number` repart à 1) | Prévenir le mainteneur : il ajoute un décalage au numéro de build dans `testflight.yml` |
 | Le build n'apparaît pas chez le testeur | Il n'est pas dans le groupe interne, ou la distribution automatique est désactivée | Étape 5 |
