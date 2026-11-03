@@ -72,13 +72,19 @@ struct ContentView: View {
         }
     }
 
+    private static let keepsTabBar = ProcessInfo.processInfo.isOperatingSystemAtLeast(
+        OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0))
+
     private func webTab(_ tab: WebTab) -> some View {
         let barsVisible = settings.barsAlwaysVisible || chrome.barsShown
+        // iOS 26+: hiding the tab bar from a tab leaks to the whole TabView (Settings included) and the
+        // floating tab bar no longer covers the page anyway, so it stays visible there.
+        let tabBarVisible = barsVisible || Self.keepsTabBar
         // NavigationStack: the reliable host for `.toolbar(_:for: .tabBar)`.
         return NavigationStack {
             WebTabView(tab: tab, chrome: chrome, alwaysVisible: settings.barsAlwaysVisible)
                 .toolbar(.hidden, for: .navigationBar)
-                .toolbar(barsVisible ? .visible : .hidden, for: .tabBar)
+                .toolbar(tabBarVisible ? .visible : .hidden, for: .tabBar)
         }
     }
 }

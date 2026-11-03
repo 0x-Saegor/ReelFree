@@ -30,6 +30,11 @@ final class AppModel: ObservableObject {
             self?.instagram.settingsDidChange()
             self?.youtube?.settingsDidChange()
         }
+        // D08: locking the screen while in background makes WebKit pause the video again.
+        NotificationCenter.default.addObserver(forName: UIApplication.protectedDataWillBecomeUnavailableNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.screenWillLock() }
+        }
         // D04: compiled once off the launch path; tabs created later get it at init.
         adBlocker.compile { [weak self] ruleList in
             guard let self = self else { return }
@@ -60,6 +65,11 @@ final class AppModel: ObservableObject {
         case .youtube: return youtube
         case .settings: return nil
         }
+    }
+
+    private func screenWillLock() {
+        guard lastPhase == .background else { return }   // foreground lock: handled by the phase change
+        currentTab?.appDidEnterBackground(keepPlaying: settings.backgroundPlayback)
     }
 
     /// D08: background playback and automatic Picture in Picture for the visible web tab.

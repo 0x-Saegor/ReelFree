@@ -37,7 +37,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Vidéo")
                 } footer: {
-                    Text("En quittant l'app, une vidéo en cours passe en Picture in Picture (ou continue en son seul si le PiP auto est coupé). Le bouton PiP de la barre fonctionne aussi à tout moment.")
+                    Text("En quittant l'app, le son d'une vidéo en cours continue (ou elle passe en Picture in Picture si le PiP auto est activé). Le bouton PiP de la barre fonctionne aussi à tout moment.")
                 }
 
                 Section {
@@ -55,6 +55,8 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Réglages")
+            // iOS 26: a tab bar hidden from a web tab stays hidden here otherwise (no way back).
+            .toolbar(.visible, for: .tabBar)
         }
     }
 }

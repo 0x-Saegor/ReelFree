@@ -244,10 +244,29 @@
     return true;
   }
 
+  // YouTube reuses one <video> across routes: a mute set while masked must be undone on unmask,
+  // or the next video plays silently.
+  var maskMuted = typeof WeakMap === 'function' ? new WeakMap() : null;
+
   function pauseMedia() {
     var vids = document.getElementsByTagName('video');
     for (var i = 0; i < vids.length; i++) {
-      try { vids[i].muted = true; vids[i].pause(); } catch (e) { /* ignore */ }
+      var v = vids[i];
+      try {
+        if (maskMuted && !maskMuted.has(v)) maskMuted.set(v, !!v.muted);
+        v.muted = true; v.pause();
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  function restoreSound() {
+    if (!maskMuted) return;
+    var vids = document.getElementsByTagName('video');
+    for (var i = 0; i < vids.length; i++) {
+      var v = vids[i];
+      if (!maskMuted.has(v)) continue;
+      try { v.muted = maskMuted.get(v); } catch (e) { /* ignore */ }
+      maskMuted['delete'](v);
     }
   }
 
@@ -262,9 +281,11 @@
   }
 
   function setMask(on) {
+    var was = masked;
     masked = on;
     applyAttrs();
     if (on) pauseMedia();
+    else if (was) restoreSound();
   }
 
   function isSameOriginPath(to) {

@@ -77,7 +77,7 @@ final class AppSettings: ObservableObject {
         ytHideHomeFeed = (defaults.object(forKey: Key.ytHideHomeFeed) as? Bool) ?? false
         barsAlwaysVisible = (defaults.object(forKey: Key.barsAlwaysVisible) as? Bool) ?? false
         backgroundPlayback = (defaults.object(forKey: Key.backgroundPlayback) as? Bool) ?? true
-        autoPictureInPicture = (defaults.object(forKey: Key.autoPictureInPicture) as? Bool) ?? true
+        autoPictureInPicture = (defaults.object(forKey: Key.autoPictureInPicture) as? Bool) ?? false
     }
 
     /// `window.RF_CONFIG` / `{type: "config"}` payload.

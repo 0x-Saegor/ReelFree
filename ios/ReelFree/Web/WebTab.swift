@@ -366,9 +366,24 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
     // shared DOM objects, so play()/webkitSetPresentationMode() from here act on the page's player.
     // evaluateJavaScript counts as a user gesture, which WebKit requires to start PiP.
 
-    /// Remembers the videos playing right now (isolated-world global, in memory only).
+    /// Remembers the videos playing right now (isolated-world global, in memory only) and, once per
+    /// document, hooks `pause` (capture): while the keep-alive window is open, a pause of one of those
+    /// videos is the system's (backgrounding, screen lock), so it is undone. Outside the window, pauses
+    /// are left alone (lock screen / AirPods controls keep working).
     private static let markPlayingJS = """
     (function () {
+      if (!window.__rfPauseHook) {
+        window.__rfPauseHook = true;
+        document.addEventListener('pause', function (e) {
+          var v = e.target;
+          if (!v || v.tagName !== 'VIDEO' || Date.now() > (window.__rfKeepUntil || 0)) return;
+          if ((window.__rfPlaying || []).indexOf(v) < 0 || v.webkitPresentationMode === 'picture-in-picture') return;
+          setTimeout(function () {
+            if (!v.paused || Date.now() > (window.__rfKeepUntil || 0)) return;
+            try { var p = v.play(); if (p && p.catch) p.catch(function () {}); } catch (x) {}
+          }, 120);
+        }, true);
+      }
       var all = document.querySelectorAll('video'), playing = [];
       for (var i = 0; i < all.length; i++) {
         var v = all[i];
@@ -378,6 +393,11 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
       return playing.length;
     })();
     """
+
+    /// Opens the keep-alive window (see markPlayingJS) for `ms` milliseconds.
+    private static func keepJS(ms: Int) -> String {
+        "window.__rfKeepUntil = Date.now() + \(ms);"
+    }
 
     /// PiP on the playing video, or the largest visible one; back inline if already in PiP.
     /// `onlyPlaying`: used when leaving the app, so a paused video never pops up.
@@ -422,6 +442,7 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
     """
 
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var resumeTask: Task<Void, Never>?
 
     private func runMediaJS(_ js: String) {
         webView.evaluateJavaScript(js, in: nil, in: .defaultClient) { _ in }
@@ -440,27 +461,34 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         if autoPictureInPicture { runMediaJS(Self.pipJS(onlyPlaying: true)) }
     }
 
-    /// Scene is in the background: resume the sound of what was playing (PiP keeps playing on its own).
+    /// Scene is in the background (or the screen just locked while in background): WebKit pauses the
+    /// video at some point in the next second or two. Keep a window open, resume right away and retry,
+    /// while a background task keeps the app alive until the sound is back.
     func appDidEnterBackground(keepPlaying: Bool) {
         guard keepPlaying, isVisible, !isMasked else { return }
         endBackgroundTask()
-        // Keep the app alive long enough for the resume; once audio plays, the audio mode takes over.
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "resume-media") { [weak self] in
             Task { @MainActor in self?.endBackgroundTask() }
         }
-        Task { @MainActor [weak self] in
-            for delayMs in [250, 550, 800] {
+        runMediaJS(Self.keepJS(ms: 6000))
+        runMediaJS(Self.resumeJS)
+        resumeTask?.cancel()
+        resumeTask = Task { @MainActor [weak self] in
+            for delayMs in [200, 400, 600, 800, 1000, 1500, 1500] {
                 try? await Task.sleep(for: .milliseconds(delayMs))
+                if Task.isCancelled { return }
                 self?.runMediaJS(Self.resumeJS)
             }
-            try? await Task.sleep(for: .milliseconds(900))
+            try? await Task.sleep(for: .milliseconds(500))
             self?.endBackgroundTask()
         }
     }
 
     func appDidBecomeActive() {
+        resumeTask?.cancel()
+        resumeTask = nil
         endBackgroundTask()
-        runMediaJS("window.__rfPlaying = [];")
+        runMediaJS("window.__rfKeepUntil = 0; window.__rfPlaying = [];")
     }
 
     private func endBackgroundTask() {
