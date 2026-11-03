@@ -81,6 +81,7 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
     private var observations: [NSKeyValueObservation] = []
     private var scriptSource: String?
     private var pageScriptSource: String?
+    private var backgroundScriptSource: String?
 
     @Published private(set) var canGoBack = false
     // Not @Published: no view reads it, and publishing would re-render the toolbar on every route.
@@ -111,6 +112,8 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         config.limitsNavigationsToAppBoundDomains = true
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         config.allowsInlineMediaPlayback = true
+        // D08: inline videos may go to Picture in Picture (button or leaving the app).
+        config.allowsPictureInPictureMediaPlayback = true
         config.upgradeKnownHostsToHTTPS = true
         config.dataDetectorTypes = []
 
@@ -124,6 +127,9 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         scriptSource = Self.loadScript(site.scriptResource)
         if let page = site.pageScriptResource {
             pageScriptSource = Self.loadScript(page)
+        }
+        if let bg = site.backgroundScriptResource {
+            backgroundScriptSource = Self.loadScript(bg)
         }
         proxy.target = self
         webView.configuration.userContentController.add(proxy, contentWorld: .defaultClient, name: Self.handlerName)
@@ -203,6 +209,13 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
         // No message handler exists in .page, so it cannot reach the bridge; it is optional.
         if let page = pageScriptSource {
             ucc.addUserScript(WKUserScript(source: page,
+                                           injectionTime: .atDocumentStart,
+                                           forMainFrameOnly: true,
+                                           in: .page))
+        }
+        // D08: second and last page-world script (visibility spoof, YouTube only, setting-gated).
+        if settings.backgroundPlayback, let bg = backgroundScriptSource {
+            ucc.addUserScript(WKUserScript(source: bg,
                                            injectionTime: .atDocumentStart,
                                            forMainFrameOnly: true,
                                            in: .page))
@@ -345,6 +358,115 @@ final class WebTab: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelega
             webView.pauseAllMediaPlayback(completionHandler: nil)
             webView.setAllMediaPlaybackSuspended(true, completionHandler: nil)
         }
+    }
+
+    // MARK: - Background playback & Picture in Picture (D08)
+    //
+    // Runs in the isolated world (.defaultClient): the page cannot see these calls. Video elements are
+    // shared DOM objects, so play()/webkitSetPresentationMode() from here act on the page's player.
+    // evaluateJavaScript counts as a user gesture, which WebKit requires to start PiP.
+
+    /// Remembers the videos playing right now (isolated-world global, in memory only).
+    private static let markPlayingJS = """
+    (function () {
+      var all = document.querySelectorAll('video'), playing = [];
+      for (var i = 0; i < all.length; i++) {
+        var v = all[i];
+        if (!v.paused && !v.ended && v.readyState > 2) playing.push(v);
+      }
+      window.__rfPlaying = playing;
+      return playing.length;
+    })();
+    """
+
+    /// PiP on the playing video, or the largest visible one; back inline if already in PiP.
+    /// `onlyPlaying`: used when leaving the app, so a paused video never pops up.
+    private static func pipJS(onlyPlaying: Bool) -> String {
+        """
+        (function () {
+          var all = document.querySelectorAll('video'), best = null, bestArea = 0;
+          for (var i = 0; i < all.length; i++) {
+            var v = all[i];
+            if (v.webkitPresentationMode === 'picture-in-picture') {
+              \(onlyPlaying ? "return 'already';" : "v.webkitSetPresentationMode('inline'); return 'inline';")
+            }
+          }
+          for (var j = 0; j < all.length; j++) {
+            var c = all[j], playing = !c.paused && !c.ended;
+            if (\(onlyPlaying ? "!playing" : "false")) continue;
+            var r = c.getBoundingClientRect();
+            var area = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0)) * r.width;
+            if (playing) area += 1e9;
+            if (area > bestArea) { best = c; bestArea = area; }
+          }
+          if (!best || typeof best.webkitSetPresentationMode !== 'function') return 'none';
+          best.disablePictureInPicture = false;
+          if (best.webkitSupportsPresentationMode && !best.webkitSupportsPresentationMode('picture-in-picture')) return 'unsupported';
+          best.webkitSetPresentationMode('picture-in-picture');
+          return 'pip';
+        })();
+        """
+    }
+
+    /// WebKit pauses inline video when the app goes to the background: resume what was playing.
+    private static let resumeJS = """
+    (function () {
+      var s = window.__rfPlaying || [], n = 0;
+      for (var i = 0; i < s.length; i++) {
+        var v = s[i];
+        if (!v.isConnected || !v.paused || v.webkitPresentationMode === 'picture-in-picture') continue;
+        try { var p = v.play(); if (p && p.catch) p.catch(function () {}); n++; } catch (e) {}
+      }
+      return n;
+    })();
+    """
+
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+
+    private func runMediaJS(_ js: String) {
+        webView.evaluateJavaScript(js, in: nil, in: .defaultClient) { _ in }
+    }
+
+    /// Toolbar button.
+    func togglePictureInPicture() {
+        guard isVisible, !isMasked else { return }
+        runMediaJS(Self.pipJS(onlyPlaying: false))
+    }
+
+    /// Scene went inactive (home gesture, app switcher, Control Center).
+    func appWillResignActive(autoPictureInPicture: Bool) {
+        guard isVisible, !isMasked else { return }
+        runMediaJS(Self.markPlayingJS)
+        if autoPictureInPicture { runMediaJS(Self.pipJS(onlyPlaying: true)) }
+    }
+
+    /// Scene is in the background: resume the sound of what was playing (PiP keeps playing on its own).
+    func appDidEnterBackground(keepPlaying: Bool) {
+        guard keepPlaying, isVisible, !isMasked else { return }
+        endBackgroundTask()
+        // Keep the app alive long enough for the resume; once audio plays, the audio mode takes over.
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "resume-media") { [weak self] in
+            Task { @MainActor in self?.endBackgroundTask() }
+        }
+        Task { @MainActor [weak self] in
+            for delayMs in [250, 550, 800] {
+                try? await Task.sleep(for: .milliseconds(delayMs))
+                self?.runMediaJS(Self.resumeJS)
+            }
+            try? await Task.sleep(for: .milliseconds(900))
+            self?.endBackgroundTask()
+        }
+    }
+
+    func appDidBecomeActive() {
+        endBackgroundTask()
+        runMediaJS("window.__rfPlaying = [];")
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
     }
 
     @objc private func handleRefresh(_ sender: UIRefreshControl) {

@@ -11,6 +11,8 @@ final class AppSettings: ObservableObject {
         static let blockExplore = "blockExplore"
         static let ytHideHomeFeed = "ytHideHomeFeed"
         static let barsAlwaysVisible = "barsAlwaysVisible"
+        static let backgroundPlayback = "backgroundPlayback"
+        static let autoPictureInPicture = "autoPictureInPicture"
     }
 
     static let feedLimitRange = 3...50
@@ -52,6 +54,19 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(barsAlwaysVisible, forKey: Key.barsAlwaysVisible) }
     }
 
+    /// D08: keep a playing video's sound going when the app leaves the screen.
+    @Published var backgroundPlayback: Bool {
+        didSet {
+            defaults.set(backgroundPlayback, forKey: Key.backgroundPlayback)
+            onChange?()   // reinstalls the YouTube page-world script (next page load)
+        }
+    }
+
+    /// D08: native only. Move a playing video to Picture in Picture when the app leaves the screen.
+    @Published var autoPictureInPicture: Bool {
+        didSet { defaults.set(autoPictureInPicture, forKey: Key.autoPictureInPicture) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let mode = defaults.string(forKey: Key.feedMode)
@@ -61,6 +76,8 @@ final class AppSettings: ObservableObject {
         blockExplore = (defaults.object(forKey: Key.blockExplore) as? Bool) ?? true
         ytHideHomeFeed = (defaults.object(forKey: Key.ytHideHomeFeed) as? Bool) ?? false
         barsAlwaysVisible = (defaults.object(forKey: Key.barsAlwaysVisible) as? Bool) ?? false
+        backgroundPlayback = (defaults.object(forKey: Key.backgroundPlayback) as? Bool) ?? true
+        autoPictureInPicture = (defaults.object(forKey: Key.autoPictureInPicture) as? Bool) ?? true
     }
 
     /// `window.RF_CONFIG` / `{type: "config"}` payload.

@@ -187,6 +187,14 @@ Constats mineurs (notés, non bloquants) :
 | G6 | `ios/project.yml` | `youtube-ads.js` est `optional: true` : un oubli de bundle ne serait pas détecté au build. | **Corrigé** (rf-ops) : l'étape « Package .ipa » de `ci.yml` exige les trois scripts (identiques à `web/`), les règles et le manifeste de confidentialité. |
 <!-- review-d06:end -->
 
+## 5 ter. D08 — lecture en arrière-plan et Picture in Picture, 2026-11-03
+
+- `Info.plist` : `UIBackgroundModes = [audio]`. Il ne sert qu'à garder le son d'une vidéo déjà en lecture. Aucune tâche réseau propre à l'app ne tourne en arrière-plan.
+- `AVFoundation` est ajouté à la liste des imports autorisés (`bin/verify`). C'est un framework système, utilisé uniquement pour `AVAudioSession.setCategory(.playback, mode: .moviePlayback)`.
+- Le PiP et la reprise de lecture passent par `evaluateJavaScript` dans le monde isolé `.defaultClient`. Les scripts lisent seulement l'état des éléments `<video>` et appellent `play()` ou `webkitSetPresentationMode()`. La liste des vidéos en cours (`window.__rfPlaying`) reste une variable du monde isolé, en mémoire, vidée au retour au premier plan.
+- **Deuxième et dernière exception du monde `.page` : `web/youtube-bg.js`.** Elle est réservée à YouTube et ne s'applique que si « Lecture en arrière-plan » est activé. m.youtube.com met la vidéo en pause dès que la page se dit cachée, et ces getters n'existent que côté page. Le script redéfinit 4 getters de `Document.prototype` (`hidden`, `visibilityState` et leurs variantes `webkit`), qui renvoient toujours « visible ». Il bloque aussi `visibilitychange`/`webkitvisibilitychange` en capture sur `window`. Il ne fait rien d'autre : pas de bridge, pas de réseau, pas de lecture du DOM, pas de timer, pas de stockage. `bin/verify` lui applique un profil `PAGE=2`, qui reprend les règles du monde `.page` avec une liste blanche exacte de ces 6 appels. Côté Swift, il accepte au plus deux `WKUserScript` en `.page` (sources `page` et `bg`), et `backgroundScriptResource` ne peut valoir que `nil` (Instagram) ou `"youtube-bg"`. Risque accepté : la page pourrait annuler ces getters (`configurable: true`), mais elle ne ferait que perdre la lecture en arrière-plan. Aucune protection ReelFree n'en dépend.
+- `beginBackgroundTask` est borné à environ 2,5 s : c'est juste le temps de relancer la lecture.
+
 ## 6. Risques résiduels acceptés
 - **Confiance dans WebKit, iOS et TestFlight.** Un composant compromis contourne nos contrôles.
 - **La clé API est Admin** : c'est nécessaire pour la signature gérée dans le cloud. Atténué par l'environnement GitHub restreint et la révocation simple.

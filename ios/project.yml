@@ -49,6 +49,10 @@ targets:
       - path: ../web/youtube-ads.js
         buildPhase: resources
         optional: true
+      # D08: page-world visibility spoof for YouTube background play. Optional.
+      - path: ../web/youtube-bg.js
+        buildPhase: resources
+        optional: true
     settings:
       base:
         PRODUCT_NAME: ReelFree

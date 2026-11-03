@@ -30,6 +30,15 @@ enum Site: String {
         }
     }
 
+    /// D08: optional page-world script that keeps the player playing in the background (YouTube only).
+    /// Installed only when the "Lecture en arrière-plan" setting is on.
+    var backgroundScriptResource: String? {
+        switch self {
+        case .instagram: return nil
+        case .youtube: return "youtube-bg"
+        }
+    }
+
     /// Registrable domains whose documents are guarded by the route policy (SPEC-iOS, amendment 1).
     var documentDomains: [String] {
         switch self {

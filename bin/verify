@@ -7,7 +7,7 @@
 #   bin/verify               # everything: web/*.js, ios/, secrets
 #   bin/verify --js          # web/*.js only
 #   bin/verify --swift       # ios/ only (+ secrets)
-#   bin/verify FILE.js       # one injected script (instagram.js, youtube.js, or youtube-ads.js = page world)
+#   bin/verify FILE.js       # one injected script (instagram.js, youtube.js, or youtube-ads.js / youtube-bg.js = page world)
 #   bin/verify --selftest    # every rule must catch a known-bad sample, clean samples must pass
 #
 # Last line is exactly one of:
@@ -32,7 +32,7 @@ fail() { printf 'FAIL %s\n' "$1"; exit "${2:-1}"; }
 # docs/SPEC-iOS.md, avenant 1: registrable domains (eTLD+1), each covers its subdomains.
 APP_BOUND='instagram.com cdninstagram.com fbcdn.net youtube.com ytimg.com googlevideo.com google.com gstatic.com'
 # Modules the app may import. Anything else is a third-party dependency.
-SWIFT_IMPORTS='SwiftUI UIKit WebKit Foundation Combine os OSLog XCTest Observation'
+SWIFT_IMPORTS='SwiftUI UIKit WebKit Foundation Combine os OSLog XCTest Observation AVFoundation'
 
 # ==========================================================================
 # 1. Injected JavaScript (one file)
@@ -123,6 +123,14 @@ for my $i (0 .. $#lines) {
     # Whole-line comments may say "never touches window.webkit"; code may not name it at all
     # (a fake comment line holding a bridge call is still caught by net:postmessage).
     my $code = $c =~ /^\s*(?:\*|\/\/|\/\*)/ ? "" : $c;
+    if ($ENV{PAGE} eq "2") {
+      # youtube-bg.js: the only defines are the 4 visibility getters on Document.prototype, the only
+      # listeners are the 2 visibilitychange capture stoppers; everything else follows page rules.
+      $c =~ s/^\s*var\s+DOC\s*=\s*Document\s*\.\s*prototype\s*;\s*$//;
+      $c =~ s/Object\s*\.\s*defineProperty\s*\(\s*DOC\s*,\s*'(?:hidden|visibilityState|webkitHidden|webkitVisibilityState)'\s*,\s*\{\s*configurable\s*:\s*true\s*,\s*get\s*:\s*(?:visible|notHidden)\s*\}\s*\)//g;
+      $c =~ s/^\s*window\s*\.\s*addEventListener\s*\(\s*'(?:webkit)?visibilitychange'\s*,\s*stop\s*,\s*true\s*\)\s*;\s*$//;
+      hit($n, "page:bg-proto", $l) if $c =~ /\bprototype\b/ && $c !~ /^\s*(?:\*|\/\/|\/\*)/;
+    }
     for my $r (@page_rules) { hit($n, $r->[0], $l) if ($r->[0] eq "page:bridge" ? $code : $c) =~ $r->[1]; }
   }
   for my $r (@rules) { hit($n, $r->[0], $l) if $c =~ $r->[1]; }
@@ -172,7 +180,9 @@ verify_js() {
     youtube.js)   hosts='m.youtube.com www.youtube.com' ;;
     # Page world (avenant 5): no URL literal at all, stricter rules (PAGE=1).
     youtube-ads.js) hosts='' page=1 ;;
-    *) printf 'FAIL unknown script name: %s (expected instagram.js, youtube.js or youtube-ads.js)\n' "$(basename "$f")"; return 2 ;;
+    # D08 page world: visibility spoof only (PAGE=2: page rules + exact define/listener allowlist).
+    youtube-bg.js) hosts='' page=2 ;;
+    *) printf 'FAIL unknown script name: %s (expected instagram.js, youtube.js, youtube-ads.js or youtube-bg.js)\n' "$(basename "$f")"; return 2 ;;
   esac
   sha=$(sha256sum -- "$f" | cut -d' ' -f1) || { printf 'FAIL sha256sum failed\n'; return 2; }
   # A script that does not parse never runs: nothing is hidden (fail-open). Blocking.
@@ -241,10 +251,10 @@ my @rules = (
   [ "data:keychain",       qr/\bSecItem(?:Add|Update|CopyMatching)\b/ ],
   [ "code:dynamic",        qr/\bdlopen\b|\bdlsym\b|NSClassFromString|NSSelectorFromString/ ],
 );
-my %src_text; my $bound_on = 0; my $page_scripts = 0; my $page_resource_seen = 0;
+my %src_text; my $bound_on = 0; my $page_scripts = 0; my $page_resource_seen = 0; my %page_src_seen;
 # Avenant 5 (docs/SECURITY.md T9): exactly one page-world script is allowed, in WebTab.swift,
 # spelled exactly as below (source = the bundled pageScriptResource, document start, main frame).
-my $PAGE_SCRIPT = qr/WKUserScript\s*\(\s*source\s*:\s*page\s*,\s*injectionTime\s*:\s*\.atDocumentStart\s*,\s*forMainFrameOnly\s*:\s*true\s*,\s*in\s*:\s*\.page\s*\)/;
+my $PAGE_SCRIPT = qr/WKUserScript\s*\(\s*source\s*:\s*(page|bg)\s*,\s*injectionTime\s*:\s*\.atDocumentStart\s*,\s*forMainFrameOnly\s*:\s*true\s*,\s*in\s*:\s*\.page\s*\)/;
 for my $f (@swift) {
   my $s = slurp($f); defined $s or do { hit($f, 0, "io:unreadable"); next };
   my @L = split /\n/, $s, -1;
@@ -255,8 +265,19 @@ for my $f (@swift) {
     next unless $L[$i] =~ /\bWKUserScript\s*\(/;
     my $w = join(" ", @L[$i .. ($i + 4 > $#L ? $#L : $i + 4)]);
     next unless $w =~ /\bin\s*:\s*(?:WKContentWorld)?\s*\.page\b/;
-    if ($f =~ m{/WebTab\.swift$} && $w =~ $PAGE_SCRIPT && ++$page_scripts == 1) {
+    # D08: at most two, one per source (page = youtube-ads, bg = youtube-bg).
+    if ($f =~ m{/WebTab\.swift$} && $w =~ $PAGE_SCRIPT && !$page_src_seen{$1}++ && ++$page_scripts <= 2) {
       for my $j ($i .. ($i + 4 > $#L ? $#L : $i + 4)) { $page_ok{$j} = 1; last if $L[$j] =~ /\.page\b/; }
+    }
+  }
+  # D08: the background script resource: nil for Instagram, "youtube-bg" for YouTube, nothing else.
+  if ($s =~ /var\s+backgroundScriptResource\s*:\s*String\?\s*\{(.*?)\n    \}/s) {
+    my $b = $1;
+    hit($f, 0, "webview:bg-resource", "Instagram must have no background script")
+      unless $b =~ /case\s*\.instagram\s*:\s*return\s+nil\b/;
+    while ($b =~ /return\s+([^\n]+)/g) {
+      my $v = $1; $v =~ s/\s+$//;
+      hit($f, 0, "webview:bg-resource", "backgroundScriptResource returns $v") unless $v eq 'nil' || $v eq '"youtube-bg"';
     }
   }
   # The page script resource: nil for Instagram, "youtube-ads" for YouTube, nothing else.
@@ -351,7 +372,7 @@ for my $f (@yml) {
     hit($f, $n, "build:download", $l)       if $l =~ /\b(?:curl|wget|git\s+clone|pip\s+install|npm\s+install|brew\s+install)\b/;
     # Only the three checked scripts of web/ may be bundled (and so injected).
     hit($f, $n, "build:web-resource", $l)
-      if $l =~ m{\bweb/([^\s#\x27"]+)} && $1 !~ /^(?:instagram|youtube|youtube-ads)\.js$/;
+      if $l =~ m{\bweb/([^\s#\x27"]+)} && $1 !~ /^(?:instagram|youtube|youtube-ads|youtube-bg)\.js$/;
     if ($l =~ /^(\s*)WKAppBoundDomains\s*:\s*(.*?)\s*$/) {
       my ($ind, $inline) = (length $1, $2); $domains_src++; my $before = @domains;
       if ($inline =~ /^\[(.*)\]$/) { push @domains, map { my $d = $_; $d =~ s/^\s*[\x27"]?|[\x27"]?\s*$//g; [$f, $d] } split /,/, $1; }
@@ -740,9 +761,9 @@ if [ "$mode" != --swift ]; then
   # Every script in web/ is injected or could be: each one must be a known, checked file.
   stray=$(find "$ROOT/web" -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) \
             ! -path "$ROOT/web/instagram.js" ! -path "$ROOT/web/youtube.js" \
-            ! -path "$ROOT/web/youtube-ads.js" -printf '%P ' 2>/dev/null)
+            ! -path "$ROOT/web/youtube-ads.js" ! -path "$ROOT/web/youtube-bg.js" -printf '%P ' 2>/dev/null)
   [ -z "$stray" ] || note 1 "unexpected script(s) in web/: $stray"
-  for f in "$ROOT/web/instagram.js" "$ROOT/web/youtube.js" "$ROOT/web/youtube-ads.js"; do
+  for f in "$ROOT/web/instagram.js" "$ROOT/web/youtube.js" "$ROOT/web/youtube-ads.js" "$ROOT/web/youtube-bg.js"; do
     [ -f "$f" ] || continue
     name=$(basename "$f" .js)
     printf '== web/%s.js\n' "$name"

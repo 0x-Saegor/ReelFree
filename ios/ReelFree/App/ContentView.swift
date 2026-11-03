@@ -143,6 +143,17 @@ struct WebTabView: View {
 
             Button {
                 chrome.poke()
+                tab.togglePictureInPicture()
+            } label: {
+                Image(systemName: "pip.enter")
+                    .frame(width: 44, height: 36)
+            }
+            .accessibilityLabel("Picture in Picture")
+
+            Spacer()
+
+            Button {
+                chrome.poke()
                 tab.reload()
             } label: {
                 Image(systemName: "arrow.clockwise")

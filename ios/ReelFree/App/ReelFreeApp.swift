@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import WebKit
 
@@ -14,10 +15,15 @@ final class AppModel: ObservableObject {
     let instagram: WebTab
     @Published private(set) var youtube: WebTab?
     private let adBlocker = AdBlocker()
+    private var selection: AppTab = .instagram
+    private var lastPhase: ScenePhase = .active
 
     init() {
         let settings = AppSettings()
         self.settings = settings
+        // D08: playback category so video sound keeps going in the background / in PiP
+        // (with UIBackgroundModes = audio in Info.plist) and ignores the silent switch.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         instagram = WebTab(site: .instagram, settings: settings)
         wire(instagram)
         settings.onChange = { [weak self] in
@@ -38,6 +44,7 @@ final class AppModel: ObservableObject {
 
     /// Visible tab only plays media; the others are paused and suspended.
     func select(_ selection: AppTab) {
+        self.selection = selection
         if selection == .youtube && youtube == nil {
             let tab = WebTab(site: .youtube, settings: settings, ruleList: adBlocker.ruleList)
             wire(tab)
@@ -46,15 +53,40 @@ final class AppModel: ObservableObject {
         instagram.setVisible(selection == .instagram)
         youtube?.setVisible(selection == .youtube)
     }
+
+    private var currentTab: WebTab? {
+        switch selection {
+        case .instagram: return instagram
+        case .youtube: return youtube
+        case .settings: return nil
+        }
+    }
+
+    /// D08: background playback and automatic Picture in Picture for the visible web tab.
+    func scenePhaseChanged(_ phase: ScenePhase) {
+        defer { lastPhase = phase }
+        switch phase {
+        case .inactive where lastPhase == .active:
+            currentTab?.appWillResignActive(autoPictureInPicture: settings.autoPictureInPicture)
+        case .background:
+            currentTab?.appDidEnterBackground(keepPlaying: settings.backgroundPlayback)
+        case .active:
+            currentTab?.appDidBecomeActive()
+        default:
+            break
+        }
+    }
 }
 
 @main
 struct ReelFreeApp: App {
     @StateObject private var model = AppModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             ContentView(model: model, settings: model.settings, chrome: model.chrome)
         }
+        .onChange(of: scenePhase) { _, phase in model.scenePhaseChanged(phase) }
     }
 }

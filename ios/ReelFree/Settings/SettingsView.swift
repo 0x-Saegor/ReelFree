@@ -32,6 +32,15 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Lecture en arrière-plan", isOn: $settings.backgroundPlayback)
+                    Toggle("Picture in Picture auto", isOn: $settings.autoPictureInPicture)
+                } header: {
+                    Text("Vidéo")
+                } footer: {
+                    Text("En quittant l'app, une vidéo en cours passe en Picture in Picture (ou continue en son seul si le PiP auto est coupé). Le bouton PiP de la barre fonctionne aussi à tout moment.")
+                }
+
+                Section {
                     Toggle("Barres toujours visibles", isOn: $settings.barsAlwaysVisible)
                 } header: {
                     Text("Affichage")
